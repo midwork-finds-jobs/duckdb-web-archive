@@ -13,6 +13,8 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/main/database.hpp"
@@ -68,7 +70,8 @@ struct CDXRecord {
 
 // Structure to hold bind data for the table function
 struct CommonCrawlBindData : public TableFunctionData {
-	string index_name;
+	string index_name;  // Single index (for backwards compatibility)
+	vector<string> crawl_ids;  // Multiple crawl_ids for IN clause support
 	vector<string> column_names;
 	vector<LogicalType> column_types;
 	vector<string> fields_needed;
@@ -522,7 +525,8 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	auto state = make_uniq<CommonCrawlGlobalState>();
 
 	// If no crawl_id was specified in WHERE clause, fetch the latest one
-	if (bind_data.index_name.empty()) {
+	// Don't fetch if crawl_ids vector is populated (from IN clause)
+	if (bind_data.index_name.empty() && bind_data.crawl_ids.empty()) {
 		bind_data.index_name = GetLatestCrawlId(context);
 		fprintf(stderr, "[DEBUG] Using latest crawl_id: %s\n", bind_data.index_name.c_str());
 	}
@@ -552,8 +556,9 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 				need_warc = true;
 			}
 
-			// Add all selected columns to needed_fields (except response which is computed)
-			if (col_name != "response") {
+			// Add all selected columns to needed_fields (except response and crawl_id which are computed)
+			// crawl_id is not a CDX field - it's populated from index_name parameter
+			if (col_name != "response" && col_name != "crawl_id") {
 				needed_fields.push_back(col_name);
 			}
 		}
@@ -576,14 +581,30 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	bind_data.fetch_response = need_response;
 	fprintf(stderr, "[DEBUG] fetch_response = %d, need_warc = %d\n", bind_data.fetch_response, need_warc);
 
+	// Ensure we always request at least 'url' field from CDX API
+	// (e.g., when only crawl_id is selected, we still need a CDX field to get records)
+	if (needed_fields.empty()) {
+		needed_fields.push_back("url");
+	}
+
 	// Use the URL filter from bind data (could be set via filter pushdown)
 	string url_pattern = bind_data.url_filter;
 	fprintf(stderr, "[DEBUG] About to call QueryCDXAPI with %lu fields\n", (unsigned long)needed_fields.size());
 
-	// Query CDX API with optimized field list
-	state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+	// Query CDX API - handle multiple crawl_ids if IN clause was used
+	if (!bind_data.crawl_ids.empty()) {
+		// IN clause detected: query each crawl_id separately and combine results
+		for (const auto &crawl_id : bind_data.crawl_ids) {
+			auto records = QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+			// Append records to state
+			state->records.insert(state->records.end(), records.begin(), records.end());
+		}
+	} else {
+		// Single crawl_id: use index_name
+		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+		fprintf(stderr, "[DEBUG] QueryCDXAPI returned %lu records\n", (unsigned long)state->records.size());
+	}
 
-	fprintf(stderr, "[DEBUG] QueryCDXAPI returned %lu records\n", (unsigned long)state->records.size());
 	return std::move(state);
 }
 
@@ -761,7 +782,92 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 	for (idx_t i = 0; i < filters.size(); i++) {
 		auto &filter = filters[i];
-		fprintf(stderr, "[DEBUG] Filter %lu: class=%d\n", (unsigned long)i, (int)filter->GetExpressionClass());
+		fprintf(stderr, "[DEBUG] Filter %lu: class=%d\n",
+		        (unsigned long)i, (int)filter->GetExpressionClass());
+
+		// Handle BOUND_OPERATOR for IN clauses (e.g., crawl_id IN ('id1', 'id2'))
+		// DuckDB represents IN as a BOUND_OPERATOR with children: [column, value1, value2, ...]
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
+			auto &op = filter->Cast<BoundOperatorExpression>();
+
+			// Check if first child is a crawl_id column and rest are constants
+			if (op.children.size() >= 2 &&
+			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+
+				if (col_ref.GetName() == "crawl_id") {
+					vector<string> crawl_id_values;
+					bool all_constants = true;
+
+					// Extract all constant values (children[1] onwards)
+					for (size_t j = 1; j < op.children.size(); j++) {
+						if (op.children[j]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+							auto &constant = op.children[j]->Cast<BoundConstantExpression>();
+							if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
+								crawl_id_values.push_back(constant.value.ToString());
+								continue;
+							}
+						}
+						all_constants = false;
+						break;
+					}
+
+					if (all_constants && !crawl_id_values.empty()) {
+						bind_data.crawl_ids = crawl_id_values;
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+
+			// Alternative: Check if this is an IN operator (children[0] should be wrapped in CONJUNCTION due to optimization)
+			if (op.children.size() == 1 &&
+			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+				auto &conjunction = op.children[0]->Cast<BoundConjunctionExpression>();
+				fprintf(stderr, "[DEBUG] Found CONJUNCTION inside OPERATOR, type=%d, children=%lu\n",
+				        (int)conjunction.type, (unsigned long)conjunction.children.size());
+
+				// Only handle OR conjunctions (IN clauses become OR of equalities)
+				if (conjunction.type == ExpressionType::CONJUNCTION_OR) {
+					vector<string> crawl_id_values;
+					bool all_crawl_id_comparisons = true;
+
+					// Check if all children are crawl_id = 'value' comparisons
+					for (auto &child : conjunction.children) {
+						if (child->GetExpressionClass() == ExpressionClass::BOUND_COMPARISON &&
+						    child->type == ExpressionType::COMPARE_EQUAL) {
+							auto &comp = child->Cast<BoundComparisonExpression>();
+
+							if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+							    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+								auto &col_ref = comp.left->Cast<BoundColumnRefExpression>();
+								auto &constant = comp.right->Cast<BoundConstantExpression>();
+
+								if (col_ref.GetName() == "crawl_id" &&
+								    constant.value.type().id() == LogicalTypeId::VARCHAR) {
+									crawl_id_values.push_back(constant.value.ToString());
+									continue;
+								}
+							}
+						}
+						all_crawl_id_comparisons = false;
+						break;
+					}
+
+					// If we successfully extracted all crawl_id values from IN clause
+					if (all_crawl_id_comparisons && !crawl_id_values.empty()) {
+						bind_data.crawl_ids = crawl_id_values;
+						fprintf(stderr, "[DEBUG] IN clause detected with %lu crawl_ids\n",
+						        (unsigned long)crawl_id_values.size());
+						for (const auto &id : crawl_id_values) {
+							fprintf(stderr, "[DEBUG]   - %s\n", id.c_str());
+						}
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+		}
 
 		// Handle BOUND_FUNCTION for LIKE expressions
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {

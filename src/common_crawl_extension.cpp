@@ -80,7 +80,9 @@ struct CommonCrawlBindData : public TableFunctionData {
 	vector<string> cdx_filters; // CDX API filter parameters (e.g., "=status:200", "=mime:text/html")
 	idx_t max_results; // Maximum number of results to fetch from CDX API
 
-	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(10000) {}
+	// Default CDX limit reduced to 1000 for better performance with small LIMIT clauses
+	// Users can override with: common_crawl_index(10000) if they need more records
+	CommonCrawlBindData(string index) : index_name(std::move(index)), fetch_response(false), url_filter("*"), max_results(1000) {}
 };
 
 // Structure to hold global state for the table function

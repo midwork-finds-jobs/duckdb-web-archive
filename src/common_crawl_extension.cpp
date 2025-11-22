@@ -311,47 +311,161 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 
 // Structure to hold parsed WARC response
 struct WARCResponse {
-	string headers;
-	string body;
+	string warc_version;                    // e.g., "1.0" from "WARC/1.0"
+	unordered_map<string, string> warc_headers;  // WARC header fields as map
+	string http_version;                    // e.g., "1.1" from "HTTP/1.1"
+	int http_status_code;                   // e.g., 200 from "HTTP/1.1 200"
+	unordered_map<string, string> http_headers;  // HTTP header fields as map
+	string body;                            // HTTP response body
 };
 
-// Helper function to parse WARC format and extract HTTP response headers and body
+// Helper function to parse headers into a map
+// Handles multi-value headers by concatenating with ", "
+static unordered_map<string, string> ParseHeaders(const string &header_text) {
+	unordered_map<string, string> headers;
+
+	size_t pos = 0;
+	size_t line_end;
+
+	while (pos < header_text.length()) {
+		// Find end of line
+		line_end = header_text.find("\r\n", pos);
+		if (line_end == string::npos) {
+			line_end = header_text.find("\n", pos);
+			if (line_end == string::npos) {
+				break;
+			}
+		}
+
+		string line = header_text.substr(pos, line_end - pos);
+
+		// Find colon separator
+		size_t colon_pos = line.find(": ");
+		if (colon_pos != string::npos) {
+			string key = line.substr(0, colon_pos);
+			string value = line.substr(colon_pos + 2);
+
+			// If key already exists, concatenate with ", "
+			auto it = headers.find(key);
+			if (it != headers.end()) {
+				it->second += ", " + value;
+			} else {
+				headers[key] = value;
+			}
+		}
+
+		// Move to next line
+		pos = line_end + 1;
+		if (pos < header_text.length() && header_text[pos] == '\n') {
+			pos++;
+		}
+	}
+
+	return headers;
+}
+
+// Helper function to parse WARC format and extract structured WARC/HTTP headers and body
 static WARCResponse ParseWARCResponse(const string &warc_data) {
 	WARCResponse result;
+	result.http_status_code = 0; // Default
 
-	// WARC format has WARC headers followed by HTTP response (which has HTTP headers + body)
+	// WARC format structure:
+	// 1. WARC version line + headers (metadata about the record)
+	// 2. HTTP status line + headers
+	// 3. HTTP body (actual content)
 
 	// Find the end of WARC headers (double newline)
 	size_t warc_headers_end = warc_data.find("\r\n\r\n");
+	size_t newline_size = 4;
 	if (warc_headers_end == string::npos) {
 		warc_headers_end = warc_data.find("\n\n");
+		newline_size = 2;
 		if (warc_headers_end == string::npos) {
-			return result; // Invalid WARC format - return empty
+			return result; // Invalid WARC format
 		}
-		warc_headers_end += 2;
-	} else {
-		warc_headers_end += 4;
+	}
+
+	// Extract WARC section
+	string warc_section = warc_data.substr(0, warc_headers_end);
+
+	// Parse WARC version from first line (e.g., "WARC/1.0")
+	size_t first_line_end = warc_section.find("\r\n");
+	if (first_line_end == string::npos) {
+		first_line_end = warc_section.find("\n");
+	}
+
+	if (first_line_end != string::npos) {
+		string version_line = warc_section.substr(0, first_line_end);
+		if (version_line.find("WARC/") == 0) {
+			result.warc_version = version_line.substr(5); // Extract version after "WARC/"
+		}
+
+		// Parse remaining WARC headers (skip version line)
+		size_t warc_headers_start = first_line_end + 1;
+		if (warc_headers_start < warc_section.length() && warc_section[warc_headers_start] == '\n') {
+			warc_headers_start++;
+		}
+		string warc_headers_text = warc_section.substr(warc_headers_start);
+		result.warc_headers = ParseHeaders(warc_headers_text);
 	}
 
 	// After WARC headers comes the HTTP response
-	// Find the end of HTTP headers (double newline)
-	size_t http_headers_start = warc_headers_end;
-	size_t http_headers_end = warc_data.find("\r\n\r\n", http_headers_start);
+	size_t http_start = warc_headers_end + newline_size;
+	size_t http_headers_end = warc_data.find("\r\n\r\n", http_start);
+	size_t http_newline_size = 4;
 	if (http_headers_end == string::npos) {
-		http_headers_end = warc_data.find("\n\n", http_headers_start);
+		http_headers_end = warc_data.find("\n\n", http_start);
+		http_newline_size = 2;
 		if (http_headers_end == string::npos) {
-			return result; // Invalid HTTP format - return empty
+			return result; // Invalid HTTP format
 		}
-		http_headers_end += 2;
-	} else {
-		http_headers_end += 4;
 	}
 
-	// Extract HTTP headers (from after WARC headers to before body)
-	result.headers = warc_data.substr(http_headers_start, http_headers_end - http_headers_start);
+	// Extract HTTP section
+	string http_section = warc_data.substr(http_start, http_headers_end - http_start);
+
+	// Parse HTTP status line (e.g., "HTTP/1.1 200")
+	size_t http_first_line_end = http_section.find("\r\n");
+	if (http_first_line_end == string::npos) {
+		http_first_line_end = http_section.find("\n");
+	}
+
+	if (http_first_line_end != string::npos) {
+		string status_line = http_section.substr(0, http_first_line_end);
+
+		// Parse "HTTP/1.1 200 OK" format
+		size_t space1 = status_line.find(" ");
+		if (space1 != string::npos && status_line.find("HTTP/") == 0) {
+			// Extract version (e.g., "1.1" from "HTTP/1.1")
+			result.http_version = status_line.substr(5, space1 - 5);
+
+			// Extract status code
+			size_t space2 = status_line.find(" ", space1 + 1);
+			string status_str;
+			if (space2 != string::npos) {
+				status_str = status_line.substr(space1 + 1, space2 - space1 - 1);
+			} else {
+				status_str = status_line.substr(space1 + 1);
+			}
+
+			try {
+				result.http_status_code = std::stoi(status_str);
+			} catch (...) {
+				result.http_status_code = 0;
+			}
+		}
+
+		// Parse HTTP headers (skip status line)
+		size_t http_headers_start = http_first_line_end + 1;
+		if (http_headers_start < http_section.length() && http_section[http_headers_start] == '\n') {
+			http_headers_start++;
+		}
+		string http_headers_text = http_section.substr(http_headers_start);
+		result.http_headers = ParseHeaders(http_headers_text);
+	}
 
 	// Extract HTTP body
-	result.body = warc_data.substr(http_headers_end);
+	result.body = warc_data.substr(http_headers_end + http_newline_size);
 
 	return result;
 }
@@ -523,10 +637,21 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	names.push_back("crawl_id");
 	return_types.push_back(LogicalType::VARCHAR);
 
-	// Add response_headers column (HTTP headers from WARC)
-	// Using VARCHAR for headers (text content)
-	names.push_back("response_headers");
+	// Add warc_version column (e.g., "1.0" from "WARC/1.0")
+	names.push_back("warc_version");
 	return_types.push_back(LogicalType::VARCHAR);
+
+	// Add warc_headers column (WARC metadata headers as MAP)
+	names.push_back("warc_headers");
+	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+
+	// Add http_version column (e.g., "1.1" from "HTTP/1.1 200")
+	names.push_back("http_version");
+	return_types.push_back(LogicalType::VARCHAR);
+
+	// Add http_headers column (HTTP response headers as MAP)
+	names.push_back("http_headers");
+	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 
 	// Add response_body column (HTTP body from WARC)
 	// Using BLOB type to handle binary content (PDFs, images, etc.)
@@ -566,6 +691,13 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	}
 	fprintf(stderr, "\n");
 
+	// CDX API fields that can be requested from index.commoncrawl.org
+	// All other columns are computed by our extension
+	static const std::unordered_set<string> cdx_fields = {
+		"url", "timestamp", "mime_type", "status_code",
+		"digest", "filename", "offset", "length"
+	};
+
 	// Determine which fields are actually needed based on projection
 	vector<string> needed_fields;
 	bool need_response = false;
@@ -576,16 +708,21 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 			string col_name = bind_data.column_names[col_id];
 			fprintf(stderr, "[DEBUG] Column %lu = %s\n", (unsigned long)col_id, col_name.c_str());
 
-			if (col_name == "response_headers" || col_name == "response_body") {
+			// Check if we need to fetch WARC data for this column
+			if (col_name == "warc_version" || col_name == "warc_headers" ||
+			    col_name == "http_version" || col_name == "http_headers" ||
+			    col_name == "response_body") {
 				need_response = true;
-				need_warc = true; // Response requires filename/offset/length
+				need_warc = true; // WARC response parsing requires filename/offset/length
 			} else if (col_name == "filename" || col_name == "offset" || col_name == "length") {
 				need_warc = true;
 			}
 
-			// Add all selected columns to needed_fields (except response_headers, response_body, and crawl_id which are computed)
-			// crawl_id, response_headers, response_body are not CDX fields - they're populated by our code
-			if (col_name != "response_headers" && col_name != "response_body" && col_name != "crawl_id") {
+			// Only add CDX fields to needed_fields (whitelist approach)
+			// Non-CDX columns are computed by the extension:
+			// - crawl_id (from index name)
+			// - warc_version, warc_headers, http_version, http_headers, response_body (from WARC file)
+			if (cdx_fields.count(col_name) > 0) {
 				needed_fields.push_back(col_name);
 			}
 		}
@@ -743,17 +880,77 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 				} else if (col_name == "crawl_id") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], record.crawl_id);
-				} else if (col_name == "response_headers" || col_name == "response_body") {
+				} else if (col_name == "warc_version" || col_name == "warc_headers" ||
+				           col_name == "http_version" || col_name == "http_headers" ||
+				           col_name == "response_body") {
 					if (bind_data.fetch_response) {
 						WARCResponse warc_response = FetchWARCResponse(context, record);
-						auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 
-						if (col_name == "response_headers") {
-							// Headers are text, use AddString with UTF-8 validation
+						if (col_name == "warc_version") {
+							// WARC version string
+							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 							data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx],
-							                                                    SanitizeUTF8(warc_response.headers));
-						} else {
+							                                                    SanitizeUTF8(warc_response.warc_version));
+						} else if (col_name == "warc_headers") {
+							// WARC headers as MAP(VARCHAR, VARCHAR)
+							auto &map_vector = output.data[proj_idx];
+							auto &child_keys = MapVector::GetKeys(map_vector);
+							auto &child_values = MapVector::GetValues(map_vector);
+
+							// Add each header as key-value pair
+							idx_t map_offset = ListVector::GetListSize(map_vector);
+							for (const auto &header : warc_response.warc_headers) {
+								// Add key
+								auto key_data = FlatVector::GetData<string_t>(child_keys);
+								key_data[map_offset] = StringVector::AddString(child_keys, header.first);
+
+								// Add value
+								auto value_data = FlatVector::GetData<string_t>(child_values);
+								value_data[map_offset] = StringVector::AddString(child_values, SanitizeUTF8(header.second));
+
+								map_offset++;
+							}
+
+							// Set map entry
+							auto map_data = FlatVector::GetData<list_entry_t>(map_vector);
+							map_data[output_offset].offset = ListVector::GetListSize(map_vector);
+							map_data[output_offset].length = warc_response.warc_headers.size();
+							ListVector::SetListSize(map_vector, map_offset);
+
+						} else if (col_name == "http_version") {
+							// HTTP version string
+							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+							data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx],
+							                                                    SanitizeUTF8(warc_response.http_version));
+						} else if (col_name == "http_headers") {
+							// HTTP headers as MAP(VARCHAR, VARCHAR)
+							auto &map_vector = output.data[proj_idx];
+							auto &child_keys = MapVector::GetKeys(map_vector);
+							auto &child_values = MapVector::GetValues(map_vector);
+
+							// Add each header as key-value pair
+							idx_t map_offset = ListVector::GetListSize(map_vector);
+							for (const auto &header : warc_response.http_headers) {
+								// Add key
+								auto key_data = FlatVector::GetData<string_t>(child_keys);
+								key_data[map_offset] = StringVector::AddString(child_keys, header.first);
+
+								// Add value
+								auto value_data = FlatVector::GetData<string_t>(child_values);
+								value_data[map_offset] = StringVector::AddString(child_values, SanitizeUTF8(header.second));
+
+								map_offset++;
+							}
+
+							// Set map entry
+							auto map_data = FlatVector::GetData<list_entry_t>(map_vector);
+							map_data[output_offset].offset = ListVector::GetListSize(map_vector);
+							map_data[output_offset].length = warc_response.http_headers.size();
+							ListVector::SetListSize(map_vector, map_offset);
+
+						} else if (col_name == "response_body") {
 							// Body can be binary (images, PDFs, etc.), use AddStringOrBlob
+							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 							data_ptr[output_offset] = StringVector::AddStringOrBlob(output.data[proj_idx],
 							                                                         warc_response.body);
 						}

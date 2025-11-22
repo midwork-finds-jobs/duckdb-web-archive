@@ -637,26 +637,22 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	names.push_back("crawl_id");
 	return_types.push_back(LogicalType::VARCHAR);
 
-	// Add warc_version column (e.g., "1.0" from "WARC/1.0")
-	names.push_back("warc_version");
-	return_types.push_back(LogicalType::VARCHAR);
+	// Add warc STRUCT with WARC metadata
+	// Fields: version (VARCHAR), headers (MAP)
+	names.push_back("warc");
+	child_list_t<LogicalType> warc_children;
+	warc_children.push_back(make_pair("version", LogicalType::VARCHAR));
+	warc_children.push_back(make_pair("headers", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
+	return_types.push_back(LogicalType::STRUCT(warc_children));
 
-	// Add warc_headers column (WARC metadata headers as MAP)
-	names.push_back("warc_headers");
-	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
-
-	// Add http_version column (e.g., "1.1" from "HTTP/1.1 200")
-	names.push_back("http_version");
-	return_types.push_back(LogicalType::VARCHAR);
-
-	// Add http_headers column (HTTP response headers as MAP)
-	names.push_back("http_headers");
-	return_types.push_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
-
-	// Add response_body column (HTTP body from WARC)
-	// Using BLOB type to handle binary content (PDFs, images, etc.)
-	names.push_back("response_body");
-	return_types.push_back(LogicalType::BLOB);
+	// Add response STRUCT with HTTP response details
+	// Fields: body (BLOB), headers (MAP), http_version (VARCHAR)
+	names.push_back("response");
+	child_list_t<LogicalType> response_children;
+	response_children.push_back(make_pair("body", LogicalType::BLOB));
+	response_children.push_back(make_pair("headers", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)));
+	response_children.push_back(make_pair("http_version", LogicalType::VARCHAR));
+	return_types.push_back(LogicalType::STRUCT(response_children));
 
 	// Enable response fetching (implemented with HTTP range requests + gzip decompression)
 	// Note: This will fetch WARC files which can be slow for large result sets
@@ -709,9 +705,7 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 			fprintf(stderr, "[DEBUG] Column %lu = %s\n", (unsigned long)col_id, col_name.c_str());
 
 			// Check if we need to fetch WARC data for this column
-			if (col_name == "warc_version" || col_name == "warc_headers" ||
-			    col_name == "http_version" || col_name == "http_headers" ||
-			    col_name == "response_body") {
+			if (col_name == "warc" || col_name == "response") {
 				need_response = true;
 				need_warc = true; // WARC response parsing requires filename/offset/length
 			} else if (col_name == "filename" || col_name == "offset" || col_name == "length") {
@@ -721,7 +715,7 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 			// Only add CDX fields to needed_fields (whitelist approach)
 			// Non-CDX columns are computed by the extension:
 			// - crawl_id (from index name)
-			// - warc_version, warc_headers, http_version, http_headers, response_body (from WARC file)
+			// - warc, response (from WARC file)
 			if (cdx_fields.count(col_name) > 0) {
 				needed_fields.push_back(col_name);
 			}
@@ -880,79 +874,78 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 				} else if (col_name == "crawl_id") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], record.crawl_id);
-				} else if (col_name == "warc_version" || col_name == "warc_headers" ||
-				           col_name == "http_version" || col_name == "http_headers" ||
-				           col_name == "response_body") {
+				} else if (col_name == "warc" || col_name == "response") {
 					if (bind_data.fetch_response) {
 						WARCResponse warc_response = FetchWARCResponse(context, record);
 
-						if (col_name == "warc_version") {
-							// WARC version string
-							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
-							data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx],
-							                                                    SanitizeUTF8(warc_response.warc_version));
-						} else if (col_name == "warc_headers") {
-							// WARC headers as MAP(VARCHAR, VARCHAR)
-							auto &map_vector = output.data[proj_idx];
-							auto &child_keys = MapVector::GetKeys(map_vector);
-							auto &child_values = MapVector::GetValues(map_vector);
+						if (col_name == "warc") {
+							// WARC STRUCT with version and headers
+							auto &struct_vector = output.data[proj_idx];
+							auto &struct_children = StructVector::GetEntries(struct_vector);
 
-							// Add each header as key-value pair
-							idx_t map_offset = ListVector::GetListSize(map_vector);
+							// Child 0: version (VARCHAR)
+							auto &version_vector = struct_children[0];
+							auto version_data = FlatVector::GetData<string_t>(*version_vector);
+							version_data[output_offset] = StringVector::AddString(*version_vector,
+							                                                        SanitizeUTF8(warc_response.warc_version));
+
+							// Child 1: headers (MAP)
+							auto &headers_map = struct_children[1];
+							auto &map_keys = MapVector::GetKeys(*headers_map);
+							auto &map_values = MapVector::GetValues(*headers_map);
+
+							idx_t map_offset = ListVector::GetListSize(*headers_map);
 							for (const auto &header : warc_response.warc_headers) {
-								// Add key
-								auto key_data = FlatVector::GetData<string_t>(child_keys);
-								key_data[map_offset] = StringVector::AddString(child_keys, header.first);
+								auto key_data = FlatVector::GetData<string_t>(map_keys);
+								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
 
-								// Add value
-								auto value_data = FlatVector::GetData<string_t>(child_values);
-								value_data[map_offset] = StringVector::AddString(child_values, SanitizeUTF8(header.second));
+								auto value_data = FlatVector::GetData<string_t>(map_values);
+								value_data[map_offset] = StringVector::AddString(map_values, SanitizeUTF8(header.second));
 
 								map_offset++;
 							}
 
-							// Set map entry
-							auto map_data = FlatVector::GetData<list_entry_t>(map_vector);
-							map_data[output_offset].offset = ListVector::GetListSize(map_vector);
+							auto map_data = FlatVector::GetData<list_entry_t>(*headers_map);
+							map_data[output_offset].offset = ListVector::GetListSize(*headers_map);
 							map_data[output_offset].length = warc_response.warc_headers.size();
-							ListVector::SetListSize(map_vector, map_offset);
+							ListVector::SetListSize(*headers_map, map_offset);
 
-						} else if (col_name == "http_version") {
-							// HTTP version string
-							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
-							data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx],
-							                                                    SanitizeUTF8(warc_response.http_version));
-						} else if (col_name == "http_headers") {
-							// HTTP headers as MAP(VARCHAR, VARCHAR)
-							auto &map_vector = output.data[proj_idx];
-							auto &child_keys = MapVector::GetKeys(map_vector);
-							auto &child_values = MapVector::GetValues(map_vector);
+						} else if (col_name == "response") {
+							// Response STRUCT with body, headers, http_version
+							auto &struct_vector = output.data[proj_idx];
+							auto &struct_children = StructVector::GetEntries(struct_vector);
 
-							// Add each header as key-value pair
-							idx_t map_offset = ListVector::GetListSize(map_vector);
+							// Child 0: body (BLOB)
+							auto &body_vector = struct_children[0];
+							auto body_data = FlatVector::GetData<string_t>(*body_vector);
+							body_data[output_offset] = StringVector::AddStringOrBlob(*body_vector, warc_response.body);
+
+							// Child 1: headers (MAP)
+							auto &headers_map = struct_children[1];
+							auto &map_keys = MapVector::GetKeys(*headers_map);
+							auto &map_values = MapVector::GetValues(*headers_map);
+
+							idx_t map_offset = ListVector::GetListSize(*headers_map);
 							for (const auto &header : warc_response.http_headers) {
-								// Add key
-								auto key_data = FlatVector::GetData<string_t>(child_keys);
-								key_data[map_offset] = StringVector::AddString(child_keys, header.first);
+								auto key_data = FlatVector::GetData<string_t>(map_keys);
+								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
 
-								// Add value
-								auto value_data = FlatVector::GetData<string_t>(child_values);
-								value_data[map_offset] = StringVector::AddString(child_values, SanitizeUTF8(header.second));
+								auto value_data = FlatVector::GetData<string_t>(map_values);
+								value_data[map_offset] = StringVector::AddString(map_values, SanitizeUTF8(header.second));
 
 								map_offset++;
 							}
 
-							// Set map entry
-							auto map_data = FlatVector::GetData<list_entry_t>(map_vector);
-							map_data[output_offset].offset = ListVector::GetListSize(map_vector);
+							auto map_data = FlatVector::GetData<list_entry_t>(*headers_map);
+							map_data[output_offset].offset = ListVector::GetListSize(*headers_map);
 							map_data[output_offset].length = warc_response.http_headers.size();
-							ListVector::SetListSize(map_vector, map_offset);
+							ListVector::SetListSize(*headers_map, map_offset);
 
-						} else if (col_name == "response_body") {
-							// Body can be binary (images, PDFs, etc.), use AddStringOrBlob
-							auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
-							data_ptr[output_offset] = StringVector::AddStringOrBlob(output.data[proj_idx],
-							                                                         warc_response.body);
+							// Child 2: http_version (VARCHAR)
+							auto &version_vector = struct_children[2];
+							auto version_data = FlatVector::GetData<string_t>(*version_vector);
+							version_data[output_offset] = StringVector::AddString(*version_vector,
+							                                                        SanitizeUTF8(warc_response.http_version));
 						}
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);

@@ -1808,6 +1808,66 @@ static unique_ptr<NodeStatistics> InternetArchiveCardinality(ClientContext &cont
 // EXTENSION LOADER
 // ========================================
 
+// Optimizer function to push down LIMIT to common_crawl_index function
+static void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op) {
+	if (op->type == LogicalOperatorType::LOGICAL_LIMIT) {
+		auto &limit = op->Cast<LogicalLimit>();
+		reference<LogicalOperator> child = *op->children[0];
+
+		// Skip projection operators to find the GET
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			child = *child.get().children[0];
+		}
+
+		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
+			OptimizeCommonCrawlLimitPushdown(op->children[0]);
+			return;
+		}
+
+		auto &get = child.get().Cast<LogicalGet>();
+		if (get.function.name != "common_crawl_index") {
+			OptimizeCommonCrawlLimitPushdown(op->children[0]);
+			return;
+		}
+
+		// Only push down constant limits (not expressions)
+		switch (limit.limit_val.Type()) {
+		case LimitNodeType::CONSTANT_VALUE:
+		case LimitNodeType::UNSET:
+			break;
+		default:
+			// not a constant or unset limit
+			OptimizeCommonCrawlLimitPushdown(op->children[0]);
+			return;
+		}
+
+		// Extract limit value and store in bind_data
+		auto &bind_data = get.bind_data->Cast<CommonCrawlBindData>();
+		if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
+			auto limit_value = limit.limit_val.GetConstantValue();
+			// For common_crawl with multiple crawl_ids, divide limit across crawl_ids
+			if (!bind_data.crawl_ids.empty()) {
+				limit_value = (limit_value + bind_data.crawl_ids.size() - 1) / bind_data.crawl_ids.size();
+				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu (divided across %lu crawl_ids)\n",
+				        (unsigned long)limit_value, (unsigned long)bind_data.crawl_ids.size());
+			} else {
+				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
+				        (unsigned long)limit_value);
+			}
+			bind_data.max_results = limit_value;
+
+			// Remove the LIMIT node from the plan since we've pushed it down
+			op = std::move(op->children[0]);
+			return;
+		}
+	}
+
+	// Recurse into children
+	for (auto &child : op->children) {
+		OptimizeCommonCrawlLimitPushdown(child);
+	}
+}
+
 // Optimizer function to push down LIMIT to internet_archive function
 static void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 	if (op->type == LogicalOperatorType::LOGICAL_LIMIT) {
@@ -1861,6 +1921,7 @@ static void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op
 }
 
 static void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	OptimizeCommonCrawlLimitPushdown(plan);
 	OptimizeInternetArchiveLimitPushdown(plan);
 }
 

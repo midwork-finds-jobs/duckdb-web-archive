@@ -1025,17 +1025,30 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			bind_data.max_results = top_n.limit;
 			bind_data.fast_latest = true;
 			bind_data.order_desc = true;
-			fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu\n",
-			        (unsigned long)bind_data.max_results);
+			// Push down offset if present
+			if (top_n.offset > 0) {
+				bind_data.offset = top_n.offset;
+				fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu, offset=%lu\n",
+				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
+			} else {
+				fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu\n",
+				        (unsigned long)bind_data.max_results);
+			}
 
 			// Keep TOP_N in plan - API returns latest results but not in DESC order
 			// DuckDB will sort them after fetching
 			return;
 		} else {
-			// Regular TOP_N - just push down the limit
+			// Regular TOP_N - just push down the limit and offset
 			bind_data.max_results = top_n.limit;
-			fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu\n",
-			        (unsigned long)bind_data.max_results);
+			if (top_n.offset > 0) {
+				bind_data.offset = top_n.offset;
+				fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu, offset=%lu\n",
+				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
+			} else {
+				fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu\n",
+				        (unsigned long)bind_data.max_results);
+			}
 			// Keep TOP_N in plan for non-DESC ordering
 		}
 	}
@@ -1061,7 +1074,7 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
-		// Only push down constant limits (not expressions)
+		// Only push down constant limits and offsets (not expressions)
 		switch (limit.limit_val.Type()) {
 		case LimitNodeType::CONSTANT_VALUE:
 		case LimitNodeType::UNSET:
@@ -1072,12 +1085,33 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			return;
 		}
 
+		// Check offset type too
+		bool has_constant_offset = false;
+		switch (limit.offset_val.Type()) {
+		case LimitNodeType::CONSTANT_VALUE:
+			has_constant_offset = true;
+			break;
+		case LimitNodeType::UNSET:
+			break;
+		default:
+			// not a constant offset - can still push down limit but not offset
+			break;
+		}
+
 		// Extract limit value and store in bind_data
 		auto &bind_data = get.bind_data->Cast<InternetArchiveBindData>();
 		if (limit.limit_val.Type() == LimitNodeType::CONSTANT_VALUE) {
 			bind_data.max_results = limit.limit_val.GetConstantValue();
-			fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
-			        (unsigned long)bind_data.max_results);
+
+			// Also push down offset if it's a constant
+			if (has_constant_offset) {
+				bind_data.offset = limit.offset_val.GetConstantValue();
+				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu, offset=%lu\n",
+				        (unsigned long)bind_data.max_results, (unsigned long)bind_data.offset);
+			} else {
+				fprintf(stderr, "[DEBUG] LIMIT pushdown: max_results set to %lu\n",
+				        (unsigned long)bind_data.max_results);
+			}
 
 			// Remove the LIMIT node from the plan since we've pushed it down
 			op = std::move(op->children[0]);

@@ -323,3 +323,31 @@ LIMIT 5;
 ----
 true
 
+# ============================================
+# SQL OFFSET PUSHDOWN TESTS
+# ============================================
+
+# Test: SQL OFFSET is pushed down to CDX API
+query I
+SELECT cdx_url LIKE '%&offset=50%' AND cdx_url LIKE '%&limit=10%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 10 OFFSET 50;
+----
+true
+
+# Test: LIMIT without OFFSET has no offset in URL
+query I
+SELECT cdx_url NOT LIKE '%offset%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 5;
+----
+true
+
+# Test: OFFSET 0 should not add offset parameter
+query I
+SELECT cdx_url NOT LIKE '%offset%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 10 OFFSET 0;
+----
+true
+

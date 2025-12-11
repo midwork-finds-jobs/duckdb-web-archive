@@ -1,0 +1,91 @@
+# name: test/sql/internet_archive_fast_latest.test
+# description: Tests for internet_archive ORDER BY timestamp DESC fastLatest pushdown
+# group: [internet_archive]
+
+# These tests require httpfs for network access to verify actual responses
+require common_crawl
+
+require httpfs
+
+# ============================================
+# ORDER BY TIMESTAMP DESC FASTLATEST PUSHDOWN
+# ============================================
+
+# Test: ORDER BY timestamp ASC should NOT use fastLatest
+query I
+SELECT cdx_url NOT LIKE '%fastLatest%' FROM (
+    SELECT cdx_url FROM internet_archive()
+    WHERE url = 'example.com'
+    ORDER BY timestamp ASC
+    LIMIT 5
+) LIMIT 1;
+----
+true
+
+# Test: ORDER BY timestamp DESC should use fastLatest with negative limit
+query I
+SELECT cdx_url LIKE '%fastLatest=true%' AND cdx_url LIKE '%limit=-%' FROM (
+    SELECT cdx_url FROM internet_archive()
+    WHERE url = 'example.com'
+    ORDER BY timestamp DESC
+    LIMIT 5
+) LIMIT 1;
+----
+true
+
+# Test: ORDER BY timestamp DESC LIMIT 10 uses fastLatest with limit=-10
+query I
+SELECT cdx_url LIKE '%fastLatest=true&limit=-10%' FROM (
+    SELECT cdx_url FROM internet_archive()
+    WHERE url = 'example.com'
+    ORDER BY timestamp DESC
+    LIMIT 10
+) LIMIT 1;
+----
+true
+
+# Test: ORDER BY timestamp DESC LIMIT 1 uses fastLatest with limit=-1
+query I
+SELECT cdx_url LIKE '%fastLatest=true&limit=-1%' FROM (
+    SELECT cdx_url FROM internet_archive()
+    WHERE url = 'example.com'
+    ORDER BY timestamp DESC
+    LIMIT 1
+) LIMIT 1;
+----
+true
+
+# Test: ORDER BY timestamp DESC with filters still uses fastLatest
+query I
+SELECT
+    cdx_url LIKE '%fastLatest=true%'
+    AND cdx_url LIKE '%limit=-%'
+    AND cdx_url LIKE '%filter=statuscode:200%'
+FROM (
+    SELECT cdx_url FROM internet_archive()
+    WHERE url = 'example.com'
+      AND status_code = 200
+    ORDER BY timestamp DESC
+    LIMIT 5
+) LIMIT 1;
+----
+true
+
+# ============================================
+# VERIFY RESULTS ARE IN DESCENDING ORDER
+# ============================================
+
+# Test: Results from ORDER BY timestamp DESC are actually in descending order
+query I
+SELECT COUNT(*) = 0 FROM (
+    SELECT
+        timestamp as ts,
+        LEAD(timestamp) OVER () as next_ts
+    FROM internet_archive()
+    WHERE url = 'example.com'
+    ORDER BY timestamp DESC
+    LIMIT 5
+) WHERE next_ts > ts;
+----
+true
+

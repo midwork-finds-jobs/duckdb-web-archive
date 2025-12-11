@@ -275,3 +275,23 @@ LIMIT 10;
 ----
 true
 
+# ============================================
+# FAST_LATEST PUSHDOWN TESTS (without ORDER BY)
+# ============================================
+
+# Test: Default LIMIT does NOT use fastLatest (positive limit)
+query I
+SELECT cdx_url LIKE '%&limit=5%' AND cdx_url NOT LIKE '%fastLatest%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 5;
+----
+true
+
+# Test: Plain LIMIT without ORDER BY should use positive limit
+query I
+SELECT cdx_url LIKE '%&limit=10%' AND cdx_url NOT LIKE '%limit=-%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 10;
+----
+true
+

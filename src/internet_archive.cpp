@@ -962,11 +962,13 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindDat
 
 	if (expr_class == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &col_ref = first_order.expression->Cast<BoundColumnRefExpression>();
+		string col_name = col_ref.GetName();
 		fprintf(stderr, "[DEBUG] TOP_N column name: '%s', alias: '%s'\n",
-		        col_ref.GetName().c_str(), col_ref.alias.c_str());
+		        col_name.c_str(), col_ref.alias.c_str());
 
-		// Check both GetName() and alias - DuckDB might use either
-		if (col_ref.GetName() == "timestamp" || col_ref.alias == "timestamp") {
+		// Check if column name contains "timestamp" (handles qualified names like 'internet_archive."timestamp"')
+		if (col_name.find("timestamp") != string::npos || col_ref.alias.find("timestamp") != string::npos) {
+			fprintf(stderr, "[DEBUG] TOP_N matched timestamp by name\n");
 			return true;
 		}
 
@@ -1014,8 +1016,8 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 			fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu\n",
 			        (unsigned long)bind_data.max_results);
 
-			// Remove TOP_N - API returns results in DESC order already
-			op = std::move(op->children[0]);
+			// Keep TOP_N in plan - API returns latest results but not in DESC order
+			// DuckDB will sort them after fetching
 			return;
 		} else {
 			// Regular TOP_N - just push down the limit

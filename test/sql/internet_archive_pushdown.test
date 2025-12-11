@@ -295,3 +295,31 @@ LIMIT 10;
 ----
 true
 
+# ============================================
+# SKIP (OFFSET) PARAMETER TESTS
+# ============================================
+
+# Test: skip parameter adds offset to URL
+query I
+SELECT cdx_url LIKE '%&offset=50%' FROM internet_archive(skip := 50)
+WHERE url = 'example.com'
+LIMIT 1;
+----
+true
+
+# Test: skip=0 should not add offset
+query I
+SELECT cdx_url NOT LIKE '%offset%' FROM internet_archive(skip := 0)
+WHERE url = 'example.com'
+LIMIT 1;
+----
+true
+
+# Test: skip with other parameters
+query I
+SELECT cdx_url LIKE '%&offset=100%' AND cdx_url LIKE '%&limit=5%' FROM internet_archive(skip := 100)
+WHERE url = 'example.com'
+LIMIT 5;
+----
+true
+

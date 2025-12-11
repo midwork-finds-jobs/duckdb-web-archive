@@ -33,8 +33,9 @@ struct InternetArchiveBindData : public TableFunctionData {
 	string cdx_url;   // The constructed CDX API URL (populated after query)
 	bool fast_latest; // Use fastLatest=true for efficient ORDER BY timestamp DESC
 	bool order_desc;  // ORDER BY timestamp DESC detected
+	idx_t offset;     // offset parameter for pagination
 
-	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false) {}
+	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false), offset(0) {}
 };
 
 // Structure to hold global state for internet_archive table function
@@ -58,7 +59,7 @@ struct InternetArchiveGlobalState : public GlobalTableFunctionState {
 static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &match_type,
                                      const vector<string> &fields_needed, const vector<string> &cdx_filters,
                                      const string &from_date, const string &to_date, idx_t max_results,
-                                     const string &collapse, bool fast_latest) {
+                                     const string &collapse, bool fast_latest, idx_t offset) {
 	// Construct field list for &fl= parameter from fields_needed
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
 
@@ -96,6 +97,11 @@ static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &mat
 		cdx_url += "&limit=" + to_string(max_results);
 	}
 
+	// Add offset parameter for pagination
+	if (offset > 0) {
+		cdx_url += "&offset=" + to_string(offset);
+	}
+
 	// Add filter parameters
 	for (const auto &filter : cdx_filters) {
 		cdx_url += "&filter=" + filter;
@@ -118,13 +124,13 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
                                                      const string &match_type, const vector<string> &fields_needed,
                                                      const vector<string> &cdx_filters, const string &from_date,
                                                      const string &to_date, idx_t max_results, const string &collapse,
-                                                     bool fast_latest, string &out_cdx_url) {
+                                                     bool fast_latest, idx_t offset, string &out_cdx_url) {
 	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX started\n", ElapsedMs());
 	vector<ArchiveOrgRecord> records;
 
 	// Build the CDX URL
 	string cdx_url = BuildArchiveOrgCDXUrl(url_pattern, match_type, fields_needed, cdx_filters,
-	                                        from_date, to_date, max_results, collapse, fast_latest);
+	                                        from_date, to_date, max_results, collapse, fast_latest, offset);
 
 	// Construct field list for parsing (same logic as BuildArchiveOrgCDXUrl)
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
@@ -292,6 +298,12 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 			}
 			bind_data->collapse = kv.second.GetValue<string>();
 			fprintf(stderr, "[DEBUG] CDX API collapse set to: %s\n", bind_data->collapse.c_str());
+		} else if (kv.first == "skip") {
+			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
+				throw BinderException("internet_archive skip parameter must be an integer");
+			}
+			bind_data->offset = kv.second.GetValue<int64_t>();
+			fprintf(stderr, "[DEBUG] CDX API offset set to: %lu\n", (unsigned long)bind_data->offset);
 		} else {
 			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
 		}
@@ -392,7 +404,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		bind_data.cdx_url = BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type,
 		                                           bind_data.fields_needed, bind_data.cdx_filters,
 		                                           bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                                           bind_data.collapse, bind_data.fast_latest);
+		                                           bind_data.collapse, bind_data.fast_latest, bind_data.offset);
 		fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), bind_data.cdx_url.c_str());
 
 		// Create a single dummy record so we return one row with the cdx_url
@@ -403,7 +415,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		state->records = QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type,
 		                                     bind_data.fields_needed, bind_data.cdx_filters,
 		                                     bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                                     bind_data.collapse, bind_data.fast_latest, bind_data.cdx_url);
+		                                     bind_data.collapse, bind_data.fast_latest, bind_data.offset, bind_data.cdx_url);
 	}
 
 	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX returned %lu records\n", (unsigned long)state->records.size());
@@ -1100,9 +1112,10 @@ void RegisterInternetArchiveFunction(ExtensionLoader &loader) {
 	ia_func.pushdown_complex_filter = InternetArchivePushdownComplexFilter;
 	ia_func.projection_pushdown = true;
 
-	// Add named parameter
+	// Add named parameters
 	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
 	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
+	ia_func.named_parameters["skip"] = LogicalType::BIGINT;  // CDX API &offset= parameter (skip is used since offset is reserved)
 
 	internet_archive_set.AddFunction(ia_func);
 

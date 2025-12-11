@@ -15,7 +15,12 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/common_crawl_extension.cpp)
+set(EXTENSION_SOURCES
+    src/common_crawl_extension.cpp
+    src/common_crawl_utils.cpp
+    src/common_crawl_index.cpp
+    src/internet_archive.cpp
+)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

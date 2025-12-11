@@ -1,0 +1,129 @@
+# name: test/sql/internet_archive_basic.test
+# description: Basic tests for internet_archive function
+# group: [internet_archive]
+
+require common_crawl
+
+# Test that internet_archive function exists
+statement ok
+SELECT * FROM internet_archive() LIMIT 0;
+
+# Test that the function returns the expected columns
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT * FROM internet_archive()
+) ORDER BY column_name;
+----
+cdx_url
+digest
+length
+mime_type
+response
+status_code
+timestamp
+url
+urlkey
+
+# Test column types for basic fields
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM internet_archive()
+) WHERE column_name IN ('url', 'status_code', 'length', 'urlkey')
+ORDER BY column_name;
+----
+length	BIGINT
+status_code	INTEGER
+url	VARCHAR
+urlkey	VARCHAR
+
+# Test response column type (BLOB for internet_archive)
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM internet_archive()
+) WHERE column_name = 'response';
+----
+response	BLOB
+
+# Test named parameter max_results
+statement ok
+SELECT * FROM internet_archive(max_results := 10) LIMIT 0;
+
+# Test that function works without parameters (uses default)
+statement ok
+SELECT * FROM internet_archive() LIMIT 0;
+
+# Test projection - only url column
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT url FROM internet_archive()
+);
+----
+url
+
+# Test projection - multiple columns
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT url, status_code, timestamp FROM internet_archive()
+) ORDER BY column_name;
+----
+status_code
+timestamp
+url
+
+# Test WHERE clause with url (exact match)
+statement ok
+SELECT * FROM internet_archive()
+WHERE url = 'archive.org'
+LIMIT 0;
+
+# Test WHERE clause with url LIKE (prefix match)
+statement ok
+SELECT * FROM internet_archive()
+WHERE url LIKE 'archive.org/%'
+LIMIT 0;
+
+# Test WHERE clause with url LIKE (domain match)
+statement ok
+SELECT * FROM internet_archive()
+WHERE url LIKE '%.archive.org'
+LIMIT 0;
+
+# Test WHERE clause with status_code
+statement ok
+SELECT * FROM internet_archive()
+WHERE status_code = 200
+LIMIT 0;
+
+# Test WHERE clause with mime_type
+statement ok
+SELECT * FROM internet_archive()
+WHERE mime_type = 'text/html'
+LIMIT 0;
+
+# Test multiple WHERE conditions
+statement ok
+SELECT * FROM internet_archive()
+WHERE url = 'archive.org'
+  AND status_code = 200
+  AND mime_type = 'text/html'
+LIMIT 0;
+
+# Test LIMIT
+statement ok
+SELECT * FROM internet_archive()
+WHERE url = 'archive.org'
+LIMIT 0;
+
+# Test accessing response body
+statement ok
+SELECT url, octet_length(response) as size FROM internet_archive()
+WHERE url = 'archive.org'
+  AND status_code = 200
+LIMIT 0;
+
+# Test timestamp column
+statement ok
+SELECT url, timestamp FROM internet_archive()
+WHERE url = 'archive.org'
+ORDER BY timestamp DESC
+LIMIT 0;

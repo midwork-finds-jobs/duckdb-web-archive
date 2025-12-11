@@ -1,0 +1,277 @@
+# name: test/sql/internet_archive_pushdown.test
+# description: Tests for internet_archive filter and limit pushdown using cdx_url column
+# group: [internet_archive]
+
+# NOTE: When only cdx_url is selected, no network request is made.
+# This allows testing URL construction without httpfs or network access.
+
+require common_crawl
+
+# Test cdx_url column exists
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT cdx_url FROM internet_archive()
+);
+----
+cdx_url
+
+# Test cdx_url column type
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT cdx_url FROM internet_archive()
+);
+----
+cdx_url	VARCHAR
+
+# ============================================
+# LIMIT PUSHDOWN TESTS
+# ============================================
+
+# Test LIMIT pushdown appears in cdx_url
+query I
+SELECT cdx_url LIKE '%&limit=5%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 5;
+----
+true
+
+# Test different LIMIT value
+query I
+SELECT cdx_url LIKE '%&limit=10%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 10;
+----
+true
+
+# Test LIMIT 1
+query I
+SELECT cdx_url LIKE '%&limit=1%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 1;
+----
+true
+
+# ============================================
+# STATUS_CODE FILTER PUSHDOWN TESTS
+# ============================================
+
+# Test status_code = 200 pushdown
+query I
+SELECT cdx_url LIKE '%filter=statuscode:200%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND status_code = 200
+LIMIT 1;
+----
+true
+
+# Test status_code = 404 pushdown
+query I
+SELECT cdx_url LIKE '%filter=statuscode:404%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND status_code = 404
+LIMIT 1;
+----
+true
+
+# Test status_code != pushdown (negative filter)
+query I
+SELECT cdx_url LIKE '%filter=!statuscode:404%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND status_code != 404
+LIMIT 1;
+----
+true
+
+# ============================================
+# MIME_TYPE FILTER PUSHDOWN TESTS
+# ============================================
+
+# Test mime_type = 'text/html' pushdown
+query I
+SELECT cdx_url LIKE '%filter=mimetype:text/html%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND mime_type = 'text/html'
+LIMIT 1;
+----
+true
+
+# Test mime_type != pushdown (negative filter)
+query I
+SELECT cdx_url LIKE '%filter=!mimetype:application/pdf%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND mime_type != 'application/pdf'
+LIMIT 1;
+----
+true
+
+# ============================================
+# TIMESTAMP FILTER PUSHDOWN TESTS
+# ============================================
+
+# Test timestamp > pushdown (from date)
+query I
+SELECT cdx_url LIKE '%&from=2024%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND timestamp > '2024-01-01'
+LIMIT 1;
+----
+true
+
+# Test timestamp < pushdown (to date)
+query I
+SELECT cdx_url LIKE '%&to=2025%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND timestamp < '2025-01-01'
+LIMIT 1;
+----
+true
+
+# Test timestamp BETWEEN pushdown (both from and to)
+query I
+SELECT cdx_url LIKE '%&from=2024%' AND cdx_url LIKE '%&to=2025%' FROM internet_archive()
+WHERE url = 'example.com'
+  AND timestamp BETWEEN '2024-01-01' AND '2025-01-01'
+LIMIT 1;
+----
+true
+
+# ============================================
+# URL FILTER PUSHDOWN TESTS
+# ============================================
+
+# Test exact URL match
+query I
+SELECT cdx_url LIKE '%url=example.com&%' FROM internet_archive()
+WHERE url = 'example.com'
+LIMIT 1;
+----
+true
+
+# Test wildcard URL
+query I
+SELECT cdx_url LIKE '%url=example.com/*%' FROM internet_archive()
+WHERE url = 'example.com/*'
+LIMIT 1;
+----
+true
+
+# ============================================
+# URLKEY FILTER PUSHDOWN TESTS
+# ============================================
+
+# Test urlkey suffix filter (LIKE '%apply') -> regex .*apply$
+query I
+SELECT cdx_url LIKE '%filter=urlkey:.*apply$%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND urlkey LIKE '%apply'
+LIMIT 1;
+----
+true
+
+# Test urlkey NOT contains filter (NOT LIKE '%?%') -> !urlkey:.*\?.*
+query I
+SELECT cdx_url LIKE '%filter=!urlkey:%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND NOT urlkey LIKE '%?%'
+LIMIT 1;
+----
+true
+
+# Test urlkey regexp_matches pushdown
+query I
+SELECT cdx_url LIKE '%filter=urlkey:.*test.*%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND regexp_matches(urlkey, '.*test.*')
+LIMIT 1;
+----
+true
+
+# Test urlkey NOT regexp_matches pushdown
+query I
+SELECT cdx_url LIKE '%filter=!urlkey:.*spam.*%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND NOT regexp_matches(urlkey, '.*spam.*')
+LIMIT 1;
+----
+true
+
+# ============================================
+# COMBINED FILTER TESTS
+# ============================================
+
+# Test multiple filters combined
+query I
+SELECT
+    cdx_url LIKE '%filter=statuscode:200%'
+    AND cdx_url LIKE '%filter=mimetype:text/html%'
+    AND cdx_url LIKE '%&limit=5%'
+FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND status_code = 200
+  AND mime_type = 'text/html'
+LIMIT 5;
+----
+true
+
+# Test timestamp + status_code + mime_type
+query I
+SELECT
+    cdx_url LIKE '%&from=2024%'
+    AND cdx_url LIKE '%filter=statuscode:200%'
+    AND cdx_url LIKE '%filter=mimetype:text/html%'
+FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND timestamp > '2024-01-01'
+  AND status_code = 200
+  AND mime_type = 'text/html'
+LIMIT 1;
+----
+true
+
+# ============================================
+# COLLAPSE PARAMETER TESTS
+# ============================================
+
+# Test collapse parameter appears in URL
+query I
+SELECT cdx_url LIKE '%&collapse=urlkey%' FROM internet_archive(collapse := 'urlkey')
+WHERE url = 'example.com/*'
+LIMIT 1;
+----
+true
+
+# Test collapse with timestamp
+query I
+SELECT cdx_url LIKE '%&collapse=timestamp:8%' FROM internet_archive(collapse := 'timestamp:8')
+WHERE url = 'example.com/*'
+LIMIT 1;
+----
+true
+
+# ============================================
+# COMPLEX URL VERIFICATION
+# ============================================
+
+# Verify complete URL structure for a complex query
+query I
+SELECT
+    cdx_url LIKE 'https://web.archive.org/cdx/search/cdx?%'
+    AND cdx_url LIKE '%url=example.com/*%'
+    AND cdx_url LIKE '%&from=2024%'
+    AND cdx_url LIKE '%&to=2025%'
+    AND cdx_url LIKE '%&limit=10%'
+    AND cdx_url LIKE '%filter=statuscode:200%'
+    AND cdx_url LIKE '%filter=mimetype:text/html%'
+    AND cdx_url LIKE '%filter=!urlkey:%'
+    AND cdx_url LIKE '%&collapse=urlkey%'
+FROM internet_archive(collapse := 'urlkey')
+WHERE url = 'example.com/*'
+  AND timestamp > '2024-01-01'
+  AND timestamp < '2025-01-01'
+  AND status_code = 200
+  AND mime_type = 'text/html'
+  AND NOT urlkey LIKE '%?%'
+LIMIT 10;
+----
+true
+

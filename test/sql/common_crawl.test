@@ -1,24 +1,31 @@
 # name: test/sql/common_crawl.test
 # description: test common_crawl extension
-# group: [sql]
+# group: [common_crawl]
 
 # Require statement will ensure this test is run with this extension loaded
 require common_crawl
 
+# Test that httpfs is loaded (required for the extension)
+query I
+SELECT COUNT(*) >= 0 FROM duckdb_extensions() WHERE extension_name = 'httpfs' AND loaded = true;
+----
+true
+
 # Test that common_crawl_index function exists and returns correct schema
 query I
 SELECT COUNT(*) FROM (
-    SELECT * FROM common_crawl_index('CC-MAIN-2025-43') LIMIT 0
+    SELECT * FROM common_crawl_index() LIMIT 0
 );
 ----
 0
 
-# Test that the function returns the expected columns
+# Test that the function returns the expected columns including new ones
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT * FROM common_crawl_index('CC-MAIN-2025-43')
+    DESCRIBE SELECT * FROM common_crawl_index()
 ) ORDER BY column_name;
 ----
+crawl_id
 digest
 filename
 length
@@ -28,32 +35,88 @@ response
 status_code
 timestamp
 url
+warc
 
 # Test that column types are correct
 query II
 SELECT column_name, column_type FROM (
-    DESCRIBE SELECT * FROM common_crawl_index('CC-MAIN-2025-43')
-) WHERE column_name IN ('url', 'status_code', 'offset', 'length')
+    DESCRIBE SELECT * FROM common_crawl_index()
+) WHERE column_name IN ('url', 'status_code', 'offset', 'length', 'crawl_id')
 ORDER BY column_name;
 ----
+crawl_id	VARCHAR
 length	BIGINT
 offset	BIGINT
 status_code	INTEGER
 url	VARCHAR
 
-# Note: Testing with real Common Crawl data is commented out as it requires network access
-# and may be slow. Uncomment the following tests to verify with real data:
-
-# Test basic query with URL filter (requires network access)
-# query I
-# SELECT COUNT(*) >= 0 FROM common_crawl_index('CC-MAIN-2025-43')
-# WHERE url = 'https://example.com/*'
-# LIMIT 10;
-# ----
-# true
-
-# Test that httpfs is loaded (required for the extension)
-query I
-SELECT COUNT(*) >= 0 FROM duckdb_extensions() WHERE extension_name = 'httpfs' AND loaded = true;
+# Test that STRUCT columns exist with correct types
+query II
+SELECT column_name, column_type FROM (
+    DESCRIBE SELECT * FROM common_crawl_index()
+) WHERE column_name IN ('warc', 'response')
+ORDER BY column_name;
 ----
-true
+response	STRUCT(body BLOB, headers MAP(VARCHAR, VARCHAR), http_version VARCHAR)
+warc	STRUCT("version" VARCHAR, headers MAP(VARCHAR, VARCHAR))
+
+# Test that internet_archive function exists
+statement ok
+SELECT * FROM internet_archive() LIMIT 0;
+
+# Test internet_archive column list
+query I
+SELECT column_name FROM (
+    DESCRIBE SELECT * FROM internet_archive()
+) ORDER BY column_name;
+----
+cdx_url
+digest
+length
+mime_type
+response
+status_code
+timestamp
+url
+urlkey
+
+# Test named parameters work
+statement ok
+SELECT * FROM common_crawl_index(max_results := 10) LIMIT 0;
+
+# Test named parameters for internet_archive
+statement ok
+SELECT * FROM internet_archive(max_results := 10) LIMIT 0;
+
+# Test projection pushdown
+statement ok
+SELECT url, status_code FROM common_crawl_index() LIMIT 0;
+
+# Test filter pushdown
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE status_code = 200
+  AND mime_type = 'text/html'
+LIMIT 0;
+
+# Test LIMIT pushdown
+statement ok
+SELECT * FROM common_crawl_index()
+WHERE status_code = 200
+LIMIT 0;
+
+# Test accessing STRUCT fields
+statement ok
+SELECT response.body, response.headers, warc.version
+FROM common_crawl_index()
+LIMIT 0;
+
+# Test accessing MAP in STRUCT
+statement ok
+SELECT response.headers['Content-Type']
+FROM common_crawl_index()
+LIMIT 0;
+
+# Note: Testing with real Common Crawl data requires network access
+# and may be slow. The tests above verify the schema and API work correctly
+# without making actual network calls (LIMIT 0).

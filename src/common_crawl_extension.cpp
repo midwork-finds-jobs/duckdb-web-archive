@@ -15,6 +15,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -38,6 +39,7 @@
 #include <chrono>
 #include <future>
 #include <thread>
+#include <set>
 
 namespace duckdb {
 
@@ -58,6 +60,69 @@ struct CollInfoCache {
 };
 
 static CollInfoCache g_collinfo_cache;
+
+// Global start time for timing debug
+static std::chrono::steady_clock::time_point g_start_time;
+
+static double ElapsedMs() {
+	auto now = std::chrono::steady_clock::now();
+	return std::chrono::duration<double, std::milli>(now - g_start_time).count();
+}
+
+// Convert SQL LIKE pattern to regex
+// % -> .* and _ -> . with anchoring
+static string LikeToRegex(const string &like_pattern) {
+	string regex;
+	bool starts_with_percent = !like_pattern.empty() && like_pattern[0] == '%';
+	bool ends_with_percent = !like_pattern.empty() && like_pattern.back() == '%';
+
+	// Add start anchor if pattern doesn't start with %
+	if (!starts_with_percent) {
+		regex = "^";
+	}
+
+	for (size_t i = 0; i < like_pattern.size(); i++) {
+		char c = like_pattern[i];
+		if (c == '%') {
+			regex += ".*";
+		} else if (c == '_') {
+			regex += ".";
+		} else if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+		           c == '{' || c == '}' || c == '+' || c == '?' || c == '^' ||
+		           c == '$' || c == '|' || c == '\\') {
+			// Escape regex special chars
+			regex += '\\';
+			regex += c;
+		} else {
+			regex += c;
+		}
+	}
+
+	// Add end anchor if pattern doesn't end with %
+	if (!ends_with_percent) {
+		regex += "$";
+	}
+
+	return regex;
+}
+
+// Convert timestamp string to CDX format, stripping trailing zeros
+// E.g., "2024-06-01 00:00:00" -> "20240601" (not "20240601000000")
+static string ToCdxTimestamp(const string &ts_str) {
+	string digits;
+	for (char c : ts_str) {
+		if (c >= '0' && c <= '9') digits += c;
+	}
+	// Truncate to 14 chars max
+	if (digits.length() > 14) {
+		digits = digits.substr(0, 14);
+	}
+	// Strip trailing zeros
+	while (digits.length() > 4 && digits.back() == '0') {
+		digits.pop_back();
+	}
+	return digits;
+}
 
 // Structure to hold CDX record data (Common Crawl)
 struct CDXRecord {
@@ -248,7 +313,7 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 	}
 
 	// Debug: print the final CDX URL
-	fprintf(stderr, "[CDX URL] %s\n", cdx_url.c_str());
+	fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), cdx_url.c_str());
 
 	try {
 		fprintf(stderr, "[DEBUG] Opening CDX URL\n");
@@ -1321,14 +1386,17 @@ struct InternetArchiveBindData : public TableFunctionData {
 	vector<LogicalType> column_types;
 	vector<string> fields_needed;
 	bool fetch_response;
+	bool cdx_url_only;  // True if only cdx_url column is selected (skip network request)
 	string url_filter;
 	string match_type; // exact, prefix, host, domain
 	vector<string> cdx_filters; // filter=field:regex
 	string from_date; // YYYYMMDDhhmmss
 	string to_date;   // YYYYMMDDhhmmss
 	idx_t max_results; // Default limit
+	string collapse;  // collapse parameter (e.g., "urlkey", "timestamp:8")
+	string cdx_url;   // The constructed CDX API URL (populated after query)
 
-	InternetArchiveBindData() : fetch_response(false), url_filter("*"), match_type("exact"), max_results(100) {}
+	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url("") {}
 };
 
 // Structure to hold global state for internet_archive table function
@@ -1344,20 +1412,27 @@ struct InternetArchiveGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// Helper function to query Internet Archive CDX API
-static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const string &url_pattern,
-                                                     const string &match_type, const vector<string> &fields_needed,
-                                                     const vector<string> &cdx_filters, const string &from_date,
-                                                     const string &to_date, idx_t max_results) {
-	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX started\n");
-	vector<ArchiveOrgRecord> records;
+// Helper function to build Internet Archive CDX URL (without making request)
+static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &match_type,
+                                     const vector<string> &fields_needed, const vector<string> &cdx_filters,
+                                     const string &from_date, const string &to_date, idx_t max_results,
+                                     const string &collapse) {
+	// Construct field list for &fl= parameter from fields_needed
+	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
 
-	// Construct field list for &fl= parameter
-	string field_list = "urlkey,timestamp,original,mimetype,statuscode,digest,length";
+	string field_list;
+	// Order matters for parsing - keep consistent order
+	vector<string> ordered_fields = {"urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"};
+	for (const auto &f : ordered_fields) {
+		if (needed_set.count(f)) {
+			if (!field_list.empty()) field_list += ",";
+			field_list += f;
+		}
+	}
 
-	// Construct the CDX API URL
+	// Construct the CDX API URL (use CSV format - space delimited, fields in fl order)
 	string cdx_url = "https://web.archive.org/cdx/search/cdx?url=" + url_pattern +
-	                 "&output=json&fl=" + field_list;
+	                 "&output=csv&fl=" + field_list;
 
 	// Add matchType if not exact (default)
 	if (match_type != "exact") {
@@ -1380,7 +1455,42 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 		cdx_url += "&filter=" + filter;
 	}
 
-	fprintf(stderr, "[CDX URL] %s\n", cdx_url.c_str());
+	// Add collapse parameter if specified
+	if (!collapse.empty()) {
+		cdx_url += "&collapse=" + collapse;
+	}
+
+	return cdx_url;
+}
+
+// Helper function to query Internet Archive CDX API
+static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const string &url_pattern,
+                                                     const string &match_type, const vector<string> &fields_needed,
+                                                     const vector<string> &cdx_filters, const string &from_date,
+                                                     const string &to_date, idx_t max_results, const string &collapse,
+                                                     string &out_cdx_url) {
+	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX started\n", ElapsedMs());
+	vector<ArchiveOrgRecord> records;
+
+	// Build the CDX URL
+	string cdx_url = BuildArchiveOrgCDXUrl(url_pattern, match_type, fields_needed, cdx_filters,
+	                                        from_date, to_date, max_results, collapse);
+
+	// Construct field list for parsing (same logic as BuildArchiveOrgCDXUrl)
+	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
+	string field_list;
+	vector<string> ordered_fields = {"urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"};
+	for (const auto &f : ordered_fields) {
+		if (needed_set.count(f)) {
+			if (!field_list.empty()) field_list += ",";
+			field_list += f;
+		}
+	}
+	fprintf(stderr, "[DEBUG] Internet Archive CDX fields: %s\n", field_list.c_str());
+	fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), cdx_url.c_str());
+
+	// Store the CDX URL for output
+	out_cdx_url = cdx_url;
 
 	try {
 		auto &fs = FileSystem::GetFileSystem(context);
@@ -1402,76 +1512,62 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 		// Sanitize UTF-8
 		response_data = SanitizeUTF8(response_data);
 
-		// Parse newline-delimited JSON
+		// Build list of fields we're requesting (in order)
+		vector<string> fields_in_order;
+		for (const auto &f : ordered_fields) {
+			if (needed_set.count(f)) {
+				fields_in_order.push_back(f);
+			}
+		}
+
+		// Parse tab-delimited CSV (fields in same order as fl parameter)
 		std::istringstream stream(response_data);
 		string line;
 		int line_count = 0;
-		bool first_line = true;
 
 		while (std::getline(stream, line)) {
-			if (line.empty() || line[0] != '[') {
+			if (line.empty()) {
 				continue;
 			}
 			line_count++;
 
-			// Skip header line (first line with field names)
-			if (first_line) {
-				first_line = false;
-				continue;
+			// Split by space (Internet Archive CDX uses space delimiter for CSV)
+			vector<string> values;
+			std::istringstream line_stream(line);
+			string value;
+			while (line_stream >> value) {
+				values.push_back(value);
 			}
 
+			if (values.size() < fields_in_order.size()) {
+				continue;  // Skip malformed lines
+			}
+
+			// Parse data row using known field order
 			ArchiveOrgRecord record;
+			for (size_t i = 0; i < fields_in_order.size(); i++) {
+				const string &field = fields_in_order[i];
+				const string &val = values[i];
 
-			// Extract fields from JSON line
-			// Format: ["urlkey","timestamp","original","mimetype","statuscode","digest","length"]
-			record.urlkey = ExtractJSONValue(line, "");  // Will need better parsing
-			record.timestamp = ExtractJSONValue(line, "");
-			record.original = ExtractJSONValue(line, "");
-
-			// For now, parse the JSON array manually
-			// Remove brackets and quotes, split by comma
-			// This is a simple parser - a proper JSON parser would be better
-			size_t start = line.find('[');
-			size_t end = line.rfind(']');
-			if (start != string::npos && end != string::npos && end > start) {
-				string data = line.substr(start + 1, end - start - 1);
-
-				// Parse array elements
-				vector<string> values;
-				size_t pos = 0;
-				bool in_quotes = false;
-				string current;
-
-				for (size_t i = 0; i < data.length(); i++) {
-					char c = data[i];
-					if (c == '"' && (i == 0 || data[i-1] != '\\')) {
-						in_quotes = !in_quotes;
-					} else if (c == ',' && !in_quotes) {
-						values.push_back(current);
-						current.clear();
-					} else if (c != '"') {
-						current += c;
-					}
-				}
-				if (!current.empty()) {
-					values.push_back(current);
-				}
-
-				// Assign values if we have enough
-				if (values.size() >= 7) {
-					record.urlkey = values[0];
-					record.timestamp = values[1];
-					record.original = values[2];
-					record.mime_type = values[3];
-					record.status_code = values[4].empty() ? 0 : std::stoi(values[4]);
-					record.digest = values[5];
-					record.length = values[6].empty() ? 0 : std::stoll(values[6]);
-
-					records.push_back(record);
+				if (field == "urlkey") {
+					record.urlkey = val;
+				} else if (field == "timestamp") {
+					record.timestamp = val;
+				} else if (field == "original") {
+					record.original = val;
+				} else if (field == "mimetype") {
+					record.mime_type = val;
+				} else if (field == "statuscode") {
+					record.status_code = val.empty() || val == "-" ? 0 : std::stoi(val);
+				} else if (field == "digest") {
+					record.digest = val;
+				} else if (field == "length") {
+					record.length = val.empty() || val == "-" ? 0 : std::stoll(val);
 				}
 			}
+			records.push_back(record);
 		}
-		fprintf(stderr, "[DEBUG] Parsed %d JSON lines, got %lu records\n", line_count, (unsigned long)records.size());
+		fprintf(stderr, "[DEBUG] Parsed %d CSV lines, got %lu records\n", line_count, (unsigned long)records.size());
 
 	} catch (std::exception &ex) {
 		throw IOException("Error querying Internet Archive CDX API: " + string(ex.what()));
@@ -1519,7 +1615,8 @@ static string FetchArchivedPage(ClientContext &context, const ArchiveOrgRecord &
 // Bind function for internet_archive table function
 static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
-	fprintf(stderr, "[DEBUG] InternetArchiveBind called\n");
+	g_start_time = std::chrono::steady_clock::now();
+	fprintf(stderr, "[DEBUG +%.0fms] InternetArchiveBind called\n", ElapsedMs());
 
 	auto bind_data = make_uniq<InternetArchiveBindData>();
 
@@ -1531,6 +1628,12 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 			}
 			bind_data->max_results = kv.second.GetValue<int64_t>();
 			fprintf(stderr, "[DEBUG] CDX API max_results set to: %lu\n", (unsigned long)bind_data->max_results);
+		} else if (kv.first == "collapse") {
+			if (kv.second.type().id() != LogicalTypeId::VARCHAR) {
+				throw BinderException("internet_archive collapse parameter must be a string");
+			}
+			bind_data->collapse = kv.second.GetValue<string>();
+			fprintf(stderr, "[DEBUG] CDX API collapse set to: %s\n", bind_data->collapse.c_str());
 		} else {
 			throw BinderException("Unknown parameter '%s' for internet_archive", kv.first.c_str());
 		}
@@ -1569,6 +1672,10 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 	names.push_back("response");
 	return_types.push_back(LogicalType::BLOB);
 
+	// Add cdx_url column (the CDX API URL used for the query)
+	names.push_back("cdx_url");
+	return_types.push_back(LogicalType::VARCHAR);
+
 	// Don't set fetch_response here - will be determined by projection pushdown
 	bind_data->fetch_response = false;
 	bind_data->column_names = names;
@@ -1580,29 +1687,66 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 // Init global state function for internet_archive
 static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
-	fprintf(stderr, "[DEBUG] InternetArchiveInitGlobal called\n");
+	fprintf(stderr, "[DEBUG +%.0fms] InternetArchiveInitGlobal called\n", ElapsedMs());
 	auto &bind_data = const_cast<InternetArchiveBindData&>(input.bind_data->Cast<InternetArchiveBindData>());
 	auto state = make_uniq<InternetArchiveGlobalState>();
 
 	// Store projected columns
 	state->column_ids = input.column_ids;
 
-	// Determine if we need to fetch response based on projection
+	// Rebuild fields_needed based on projection pushdown
+	// Map column names to CDX API field names
+	bind_data.fields_needed.clear();
 	for (auto &col_id : input.column_ids) {
 		if (col_id < bind_data.column_names.size()) {
 			string col_name = bind_data.column_names[col_id];
 			fprintf(stderr, "[DEBUG] Projected column: %s\n", col_name.c_str());
-			if (col_name == "response") {
+
+			if (col_name == "url") {
+				bind_data.fields_needed.push_back("original");
+			} else if (col_name == "timestamp") {
+				bind_data.fields_needed.push_back("timestamp");
+			} else if (col_name == "urlkey") {
+				bind_data.fields_needed.push_back("urlkey");
+			} else if (col_name == "mime_type") {
+				bind_data.fields_needed.push_back("mimetype");
+			} else if (col_name == "status_code") {
+				bind_data.fields_needed.push_back("statuscode");
+			} else if (col_name == "digest") {
+				bind_data.fields_needed.push_back("digest");
+			} else if (col_name == "length") {
+				bind_data.fields_needed.push_back("length");
+			} else if (col_name == "response") {
 				bind_data.fetch_response = true;
 				fprintf(stderr, "[DEBUG] Will fetch response bodies\n");
+			} else if (col_name == "cdx_url") {
+				// cdx_url doesn't need any CDX fields
 			}
 		}
 	}
 
-	// Query Internet Archive CDX API
-	state->records = QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type,
-	                                     bind_data.fields_needed, bind_data.cdx_filters,
-	                                     bind_data.from_date, bind_data.to_date, bind_data.max_results);
+	// Check if only cdx_url is selected (fields_needed is empty and no response)
+	bind_data.cdx_url_only = bind_data.fields_needed.empty() && !bind_data.fetch_response;
+
+	if (bind_data.cdx_url_only) {
+		// Only cdx_url is selected - build URL without network request
+		fprintf(stderr, "[DEBUG] Only cdx_url selected - skipping network request\n");
+		bind_data.cdx_url = BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type,
+		                                           bind_data.fields_needed, bind_data.cdx_filters,
+		                                           bind_data.from_date, bind_data.to_date, bind_data.max_results,
+		                                           bind_data.collapse);
+		fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), bind_data.cdx_url.c_str());
+
+		// Create a single dummy record so we return one row with the cdx_url
+		ArchiveOrgRecord dummy;
+		state->records.push_back(dummy);
+	} else {
+		// Query Internet Archive CDX API
+		state->records = QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type,
+		                                     bind_data.fields_needed, bind_data.cdx_filters,
+		                                     bind_data.from_date, bind_data.to_date, bind_data.max_results,
+		                                     bind_data.collapse, bind_data.cdx_url);
+	}
 
 	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX returned %lu records\n", (unsigned long)state->records.size());
 
@@ -1678,6 +1822,9 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
+				} else if (col_name == "cdx_url") {
+					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
 				}
 			} catch (const std::exception &ex) {
 				fprintf(stderr, "[ERROR] Failed to process column %s: %s\n", col_name.c_str(), ex.what());
@@ -1694,7 +1841,7 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 // Filter pushdown for internet_archive
 static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                    vector<unique_ptr<Expression>> &filters) {
-	fprintf(stderr, "[DEBUG] InternetArchivePushdownComplexFilter called with %lu filters\n", (unsigned long)filters.size());
+	fprintf(stderr, "[DEBUG +%.0fms] InternetArchivePushdownComplexFilter called with %lu filters\n", ElapsedMs(), (unsigned long)filters.size());
 	auto &bind_data = bind_data_p->Cast<InternetArchiveBindData>();
 
 	// Build column map
@@ -1712,7 +1859,8 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &func = filter->Cast<BoundFunctionExpression>();
 
-			if ((func.function.name == "contains" || func.function.name == "like" || func.function.name == "~~") &&
+			// Handle LIKE for url column
+			if ((func.function.name == "like" || func.function.name == "~~") &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
@@ -1734,6 +1882,308 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 					fprintf(stderr, "[DEBUG] URL filter: %s, matchType: %s\n",
 					        bind_data.url_filter.c_str(), bind_data.match_type.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+
+				// Handle LIKE for urlkey column: urlkey LIKE '%apply' -> filter=urlkey:.*apply$
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string like_pattern = constant.value.ToString();
+					string regex_pattern = LikeToRegex(like_pattern);
+					string filter_str = "urlkey:" + regex_pattern;
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+			// Handle suffix(urlkey, 'pattern') -> filter=urlkey:.*pattern$
+			// DuckDB optimizes LIKE '%x' to suffix()
+			if (func.function.name == "suffix" &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string suffix_val = constant.value.ToString();
+					string filter_str = "urlkey:.*" + suffix_val + "$";
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey suffix: %s\n", ElapsedMs(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+			// Handle prefix(urlkey, 'pattern') -> filter=urlkey:^pattern.*
+			// DuckDB optimizes LIKE 'x%' to prefix()
+			if (func.function.name == "prefix" &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string prefix_val = constant.value.ToString();
+					string filter_str = "urlkey:^" + prefix_val + ".*";
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey prefix: %s\n", ElapsedMs(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+			// Handle contains(urlkey, 'pattern') -> filter=urlkey:.*pattern.*
+			// DuckDB optimizes LIKE '%x%' to contains()
+			if (func.function.name == "contains" &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string contains_val = constant.value.ToString();
+					// Escape regex special chars in the search string
+					string escaped;
+					for (char c : contains_val) {
+						if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+						    c == '{' || c == '}' || c == '+' || c == '?' || c == '^' ||
+						    c == '$' || c == '|' || c == '\\' || c == '*') {
+							escaped += '\\';
+						}
+						escaped += c;
+					}
+					string filter_str = "urlkey:.*" + escaped + ".*";
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey contains: %s\n", ElapsedMs(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+			// Handle regexp_matches for urlkey: urlkey ~ 'regex'
+			if ((func.function.name == "regexp_matches" || func.function.name == "~") &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string regex_pattern = constant.value.ToString();
+					string filter_str = "urlkey:" + regex_pattern;
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey regex: %s\n", ElapsedMs(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+			// Handle regexp_full_match for urlkey: SIMILAR TO converts to this
+			// SIMILAR TO uses SQL regex: % = .*, _ = ., and it's a full match (anchored)
+			if (func.function.name == "regexp_full_match" &&
+			    func.children.size() >= 2 &&
+			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+
+				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					// Convert SQL regex (%, _) to standard regex (already a full match)
+					string sql_regex = constant.value.ToString();
+					string regex_pattern = "^";
+					for (char c : sql_regex) {
+						if (c == '%') {
+							regex_pattern += ".*";
+						} else if (c == '_') {
+							regex_pattern += ".";
+						} else {
+							regex_pattern += c;
+						}
+					}
+					regex_pattern += "$";
+					string filter_str = "urlkey:" + regex_pattern;
+					bind_data.cdx_filters.push_back(filter_str);
+					fprintf(stderr, "[DEBUG +%.0fms] urlkey SIMILAR TO: %s -> %s\n", ElapsedMs(), sql_regex.c_str(), filter_str.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+			}
+
+		}
+
+		// Handle NOT (OPERATOR_NOT) for urlkey: NOT regexp_matches() or NOT LIKE
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
+		    filter->type == ExpressionType::OPERATOR_NOT) {
+			auto &op = filter->Cast<BoundOperatorExpression>();
+			if (op.children.size() >= 1 &&
+			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+
+				auto &inner_func = op.children[0]->Cast<BoundFunctionExpression>();
+
+				// NOT regexp_matches(urlkey, 'regex')
+				if ((inner_func.function.name == "regexp_matches" || inner_func.function.name == "~") &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string regex_pattern = constant.value.ToString();
+						string filter_str = "!urlkey:" + regex_pattern;
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT regex: %s\n", ElapsedMs(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+
+				// NOT (urlkey LIKE '%pattern') -> !urlkey:.*pattern$
+				if ((inner_func.function.name == "like" || inner_func.function.name == "~~") &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string like_pattern = constant.value.ToString();
+						string regex_pattern = LikeToRegex(like_pattern);
+						string filter_str = "!urlkey:" + regex_pattern;
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+
+				// NOT suffix(urlkey, 'pattern') -> !urlkey:.*pattern$
+				if (inner_func.function.name == "suffix" &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string suffix_val = constant.value.ToString();
+						string filter_str = "!urlkey:.*" + suffix_val + "$";
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT suffix: %s\n", ElapsedMs(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+
+				// NOT prefix(urlkey, 'pattern') -> !urlkey:^pattern.*
+				if (inner_func.function.name == "prefix" &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string prefix_val = constant.value.ToString();
+						string filter_str = "!urlkey:^" + prefix_val + ".*";
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT prefix: %s\n", ElapsedMs(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+
+				// NOT SIMILAR TO -> NOT regexp_full_match
+				if (inner_func.function.name == "regexp_full_match" &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string sql_regex = constant.value.ToString();
+						string regex_pattern = "^";
+						for (char c : sql_regex) {
+							if (c == '%') {
+								regex_pattern += ".*";
+							} else if (c == '_') {
+								regex_pattern += ".";
+							} else {
+								regex_pattern += c;
+							}
+						}
+						regex_pattern += "$";
+						string filter_str = "!urlkey:" + regex_pattern;
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT SIMILAR TO: %s -> %s\n", ElapsedMs(), sql_regex.c_str(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+
+				// NOT contains(urlkey, 'pattern') -> !urlkey:.*pattern.*
+				if (inner_func.function.name == "contains" &&
+				    inner_func.children.size() >= 2 &&
+				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+
+					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string contains_val = constant.value.ToString();
+						// Escape regex special chars
+						string escaped;
+						for (char c : contains_val) {
+							if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+							    c == '{' || c == '}' || c == '+' || c == '?' || c == '^' ||
+							    c == '$' || c == '|' || c == '\\' || c == '*') {
+								escaped += '\\';
+							}
+							escaped += c;
+						}
+						string filter_str = "!urlkey:.*" + escaped + ".*";
+						bind_data.cdx_filters.push_back(filter_str);
+						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT contains: %s\n", ElapsedMs(), filter_str.c_str());
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+			}
+		}
+
+		// Handle BETWEEN expressions (timestamp BETWEEN x AND y)
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+			auto &between = filter->Cast<BoundBetweenExpression>();
+			if (between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
+			    between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = between.input->Cast<BoundColumnRefExpression>();
+				if (col_ref.GetName() == "timestamp") {
+					auto &lower_const = between.lower->Cast<BoundConstantExpression>();
+					auto &upper_const = between.upper->Cast<BoundConstantExpression>();
+
+					bind_data.from_date = ToCdxTimestamp(lower_const.value.ToString());
+					bind_data.to_date = ToCdxTimestamp(upper_const.value.ToString());
+					fprintf(stderr, "[DEBUG +%.0fms] BETWEEN from=%s to=%s\n", ElapsedMs(),
+					        bind_data.from_date.c_str(), bind_data.to_date.c_str());
+
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -1787,6 +2237,27 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
 				string filter_str = "!mimetype:" + constant.value.ToString();
 				bind_data.cdx_filters.push_back(filter_str);
+				filters_to_remove.push_back(i);
+			}
+		}
+		// Handle timestamp filtering (from/to date range)
+		else if (column_name == "timestamp" &&
+		         (constant.value.type().id() == LogicalTypeId::TIMESTAMP ||
+		          constant.value.type().id() == LogicalTypeId::TIMESTAMP_TZ ||
+		          constant.value.type().id() == LogicalTypeId::DATE ||
+		          constant.value.type().id() == LogicalTypeId::VARCHAR)) {
+
+			string cdx_timestamp = ToCdxTimestamp(constant.value.ToString());
+
+			if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
+			    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+				bind_data.from_date = cdx_timestamp;
+				fprintf(stderr, "[DEBUG +%.0fms] Timestamp from: %s\n", ElapsedMs(), cdx_timestamp.c_str());
+				filters_to_remove.push_back(i);
+			} else if (filter->type == ExpressionType::COMPARE_LESSTHAN ||
+			           filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+				bind_data.to_date = cdx_timestamp;
+				fprintf(stderr, "[DEBUG +%.0fms] Timestamp to: %s\n", ElapsedMs(), cdx_timestamp.c_str());
 				filters_to_remove.push_back(i);
 			}
 		}
@@ -1972,6 +2443,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Add named parameter
 	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
+	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
 
 	internet_archive_set.AddFunction(ia_func);
 

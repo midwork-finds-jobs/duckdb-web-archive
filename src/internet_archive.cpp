@@ -8,6 +8,7 @@
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
+#include "duckdb/planner/operator/logical_top_n.hpp"
 
 namespace duckdb {
 
@@ -30,8 +31,10 @@ struct InternetArchiveBindData : public TableFunctionData {
 	idx_t max_results; // Default limit
 	string collapse;  // collapse parameter (e.g., "urlkey", "timestamp:8")
 	string cdx_url;   // The constructed CDX API URL (populated after query)
+	bool fast_latest; // Use fastLatest=true for efficient ORDER BY timestamp DESC
+	bool order_desc;  // ORDER BY timestamp DESC detected
 
-	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url("") {}
+	InternetArchiveBindData() : fetch_response(false), cdx_url_only(false), url_filter("*"), match_type("exact"), max_results(100), collapse(""), cdx_url(""), fast_latest(false), order_desc(false) {}
 };
 
 // Structure to hold global state for internet_archive table function
@@ -55,7 +58,7 @@ struct InternetArchiveGlobalState : public GlobalTableFunctionState {
 static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &match_type,
                                      const vector<string> &fields_needed, const vector<string> &cdx_filters,
                                      const string &from_date, const string &to_date, idx_t max_results,
-                                     const string &collapse) {
+                                     const string &collapse, bool fast_latest) {
 	// Construct field list for &fl= parameter from fields_needed
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
 
@@ -86,8 +89,12 @@ static string BuildArchiveOrgCDXUrl(const string &url_pattern, const string &mat
 		cdx_url += "&to=" + to_date;
 	}
 
-	// Add limit
-	cdx_url += "&limit=" + to_string(max_results);
+	// Add limit (negative for fastLatest to get latest results)
+	if (fast_latest) {
+		cdx_url += "&fastLatest=true&limit=-" + to_string(max_results);
+	} else {
+		cdx_url += "&limit=" + to_string(max_results);
+	}
 
 	// Add filter parameters
 	for (const auto &filter : cdx_filters) {
@@ -111,13 +118,13 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
                                                      const string &match_type, const vector<string> &fields_needed,
                                                      const vector<string> &cdx_filters, const string &from_date,
                                                      const string &to_date, idx_t max_results, const string &collapse,
-                                                     string &out_cdx_url) {
+                                                     bool fast_latest, string &out_cdx_url) {
 	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX started\n", ElapsedMs());
 	vector<ArchiveOrgRecord> records;
 
 	// Build the CDX URL
 	string cdx_url = BuildArchiveOrgCDXUrl(url_pattern, match_type, fields_needed, cdx_filters,
-	                                        from_date, to_date, max_results, collapse);
+	                                        from_date, to_date, max_results, collapse, fast_latest);
 
 	// Construct field list for parsing (same logic as BuildArchiveOrgCDXUrl)
 	std::set<string> needed_set(fields_needed.begin(), fields_needed.end());
@@ -385,7 +392,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		bind_data.cdx_url = BuildArchiveOrgCDXUrl(bind_data.url_filter, bind_data.match_type,
 		                                           bind_data.fields_needed, bind_data.cdx_filters,
 		                                           bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                                           bind_data.collapse);
+		                                           bind_data.collapse, bind_data.fast_latest);
 		fprintf(stderr, "[CDX URL +%.0fms] %s\n", ElapsedMs(), bind_data.cdx_url.c_str());
 
 		// Create a single dummy record so we return one row with the cdx_url
@@ -396,7 +403,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		state->records = QueryArchiveOrgCDX(context, bind_data.url_filter, bind_data.match_type,
 		                                     bind_data.fields_needed, bind_data.cdx_filters,
 		                                     bind_data.from_date, bind_data.to_date, bind_data.max_results,
-		                                     bind_data.collapse, bind_data.cdx_url);
+		                                     bind_data.collapse, bind_data.fast_latest, bind_data.cdx_url);
 	}
 
 	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX returned %lu records\n", (unsigned long)state->records.size());
@@ -934,13 +941,97 @@ static unique_ptr<NodeStatistics> InternetArchiveCardinality(ClientContext &cont
 // OPTIMIZER FOR LIMIT PUSHDOWN
 // ========================================
 
+// Helper function to check if TOP_N orders by timestamp DESC
+static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindData &bind_data) {
+	if (top_n.orders.empty()) {
+		return false;
+	}
+
+	// Check if the first (and ideally only) order is timestamp DESC
+	auto &first_order = top_n.orders[0];
+	fprintf(stderr, "[DEBUG] TOP_N order type: %s\n",
+	        first_order.type == OrderType::DESCENDING ? "DESC" : "ASC");
+
+	if (first_order.type != OrderType::DESCENDING) {
+		return false;
+	}
+
+	// Check if ordering by the timestamp column
+	auto expr_class = first_order.expression->GetExpressionClass();
+	fprintf(stderr, "[DEBUG] TOP_N expression class: %d\n", (int)expr_class);
+
+	if (expr_class == ExpressionClass::BOUND_COLUMN_REF) {
+		auto &col_ref = first_order.expression->Cast<BoundColumnRefExpression>();
+		fprintf(stderr, "[DEBUG] TOP_N column name: '%s', alias: '%s'\n",
+		        col_ref.GetName().c_str(), col_ref.alias.c_str());
+
+		// Check both GetName() and alias - DuckDB might use either
+		if (col_ref.GetName() == "timestamp" || col_ref.alias == "timestamp") {
+			return true;
+		}
+
+		// Also check by column binding - timestamp is column index 1 in our schema
+		// (url=0, timestamp=1, urlkey=2, mime_type=3, status_code=4, digest=5, length=6, response=7, cdx_url=8)
+		if (col_ref.binding.column_index == 1) {
+			fprintf(stderr, "[DEBUG] TOP_N matched timestamp by column index\n");
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // Optimizer function to push down LIMIT to internet_archive function
 void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
+	// Handle TOP_N (ORDER BY + LIMIT combined)
+	if (op->type == LogicalOperatorType::LOGICAL_TOP_N) {
+		auto &top_n = op->Cast<LogicalTopN>();
+		reference<LogicalOperator> child = *op->children[0];
+
+		// Skip projection operators to find GET
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			child = *child.get().children[0];
+		}
+
+		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
+			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			return;
+		}
+
+		auto &get = child.get().Cast<LogicalGet>();
+		if (get.function.name != "internet_archive") {
+			OptimizeInternetArchiveLimitPushdown(op->children[0]);
+			return;
+		}
+
+		auto &bind_data = get.bind_data->Cast<InternetArchiveBindData>();
+
+		// Check if ORDER BY timestamp DESC
+		if (IsTimestampDescTopN(top_n, bind_data)) {
+			bind_data.max_results = top_n.limit;
+			bind_data.fast_latest = true;
+			bind_data.order_desc = true;
+			fprintf(stderr, "[DEBUG] TOP_N timestamp DESC pushdown: fastLatest=true, limit=-%lu\n",
+			        (unsigned long)bind_data.max_results);
+
+			// Remove TOP_N - API returns results in DESC order already
+			op = std::move(op->children[0]);
+			return;
+		} else {
+			// Regular TOP_N - just push down the limit
+			bind_data.max_results = top_n.limit;
+			fprintf(stderr, "[DEBUG] TOP_N pushdown: max_results set to %lu\n",
+			        (unsigned long)bind_data.max_results);
+			// Keep TOP_N in plan for non-DESC ordering
+		}
+	}
+
+	// Handle plain LIMIT (no ORDER BY)
 	if (op->type == LogicalOperatorType::LOGICAL_LIMIT) {
 		auto &limit = op->Cast<LogicalLimit>();
 		reference<LogicalOperator> child = *op->children[0];
 
-		// Skip projection operators to find the GET
+		// Skip projection operators to find GET
 		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
 			child = *child.get().children[0];
 		}

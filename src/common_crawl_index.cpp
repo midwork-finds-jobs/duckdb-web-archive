@@ -5,6 +5,7 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -54,7 +55,8 @@ struct CommonCrawlGlobalState : public GlobalTableFunctionState {
 
 // Helper function to query CDX API using FileSystem
 static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index_name, const string &url_pattern,
-                                      const vector<string> &fields_needed, const vector<string> &cdx_filters, idx_t max_results) {
+                                      const vector<string> &fields_needed, const vector<string> &cdx_filters, idx_t max_results,
+                                      timestamp_t ts_from = timestamp_t(0), timestamp_t ts_to = timestamp_t(0)) {
 	DUCKDB_LOG_DEBUG(context, "QueryCDXAPI started +%.0fms", ElapsedMs());
 	vector<CDXRecord> records;
 
@@ -85,6 +87,17 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 	// Add limit parameter to control how many results we fetch
 	string cdx_url = "https://index.commoncrawl.org/" + index_name + "-index?url=" + url_pattern +
 	                 "&output=json&fl=" + field_list + "&limit=" + to_string(max_results);
+
+	// Add timestamp range parameters (from/to) if specified
+	// CDX API expects timestamps in YYYYMMDDHHMMSS format (14 digits)
+	if (ts_from.value != 0) {
+		string from_str = ToCdxTimestamp(Timestamp::ToString(ts_from));
+		cdx_url += "&from=" + from_str;
+	}
+	if (ts_to.value != 0) {
+		string to_str = ToCdxTimestamp(Timestamp::ToString(ts_to));
+		cdx_url += "&to=" + to_str;
+	}
 
 	// Add filter parameters (e.g., filter==statuscode:200)
 	for (const auto &filter : cdx_filters) {
@@ -437,7 +450,8 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 		// Launch async requests for each crawl_id
 		for (const auto &crawl_id : bind_data.crawl_ids) {
 			futures.push_back(std::async(std::launch::async, [&context, crawl_id, url_pattern, &needed_fields, &bind_data]() {
-				return QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+				return QueryCDXAPI(context, crawl_id, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results,
+				                   bind_data.timestamp_from, bind_data.timestamp_to);
 			}));
 		}
 
@@ -450,7 +464,8 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 		DUCKDB_LOG_DEBUG(context, "All parallel requests completed, total records: %lu +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	} else {
 		// Single crawl_id: use index_name
-		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results);
+		state->records = QueryCDXAPI(context, bind_data.index_name, url_pattern, needed_fields, bind_data.cdx_filters, bind_data.max_results,
+		                             bind_data.timestamp_from, bind_data.timestamp_to);
 		DUCKDB_LOG_DEBUG(context, "QueryCDXAPI returned %lu records +%.0fms", (unsigned long)state->records.size(), ElapsedMs());
 	}
 
@@ -630,6 +645,119 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 // FILTER PUSHDOWN
 // ========================================
 
+// Columns that support CDX regex filtering
+// NOTE: Common Crawl uses 'status' and 'mime' in CDX API (not statuscode/mimetype like Internet Archive)
+static const std::set<string> CC_CDX_REGEX_COLUMNS = {"mimetype", "statuscode"};
+
+// Escape regex special characters in a literal string
+static string EscapeRegexSpecialChars(const string &literal) {
+	string result;
+	for (char c : literal) {
+		if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+		    c == '{' || c == '}' || c == '+' || c == '?' || c == '*' ||
+		    c == '^' || c == '$' || c == '\\' || c == '|') {
+			result += '\\';
+		}
+		result += c;
+	}
+	return result;
+}
+
+// Convert SQL SIMILAR TO pattern to regex (anchored with ^ and $)
+// Handles: % -> .*, _ -> ., * -> .*
+static string SqlRegexToRegex(const string &sql_regex) {
+	string regex = "^";
+	for (size_t i = 0; i < sql_regex.size(); i++) {
+		char c = sql_regex[i];
+		if (c == '%') {
+			regex += ".*";
+		} else if (c == '_') {
+			regex += ".";
+		} else if (c == '*') {
+			// SQL SIMILAR TO uses * for regex-like patterns
+			regex += ".*";
+		} else if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+		           c == '{' || c == '}' || c == '+' || c == '?' ||
+		           c == '$' || c == '\\') {
+			// Escape regex special chars (but not ^ since we add it ourselves)
+			regex += '\\';
+			regex += c;
+		} else {
+			regex += c;
+		}
+	}
+	regex += "$";
+	return regex;
+}
+
+// Map DuckDB column name to Common Crawl CDX filter field name
+static string MapColumnToCdxFilterField(const string &col_name) {
+	if (col_name == "mimetype") return "mime";
+	if (col_name == "statuscode") return "status";
+	return col_name;
+}
+
+// Try to add a CDX regex filter for a column
+static bool TryAddCdxRegexFilter(ClientContext &context, CommonCrawlBindData &bind_data, const string &col_name,
+                                  const string &regex_pattern, const string &source, bool negated = false) {
+	if (CC_CDX_REGEX_COLUMNS.find(col_name) == CC_CDX_REGEX_COLUMNS.end()) {
+		return false;
+	}
+	string cdx_field = MapColumnToCdxFilterField(col_name);
+	string filter_str = (negated ? "!~" : "~") + cdx_field + ":" + regex_pattern;
+	bind_data.cdx_filters.push_back(filter_str);
+	DUCKDB_LOG_DEBUG(context, "%s %s regex: %s +%.0fms", col_name.c_str(), source.c_str(), filter_str.c_str(), ElapsedMs());
+	return true;
+}
+
+// Handle IN expression for CDX columns (statuscode, mimetype)
+// Converts IN (val1, val2, ...) to regex alternation ~status:(val1|val2|...)
+static bool TryHandleInExpression(ClientContext &context, CommonCrawlBindData &bind_data, BoundOperatorExpression &op,
+                                   const string &col_name, bool is_integer) {
+	if (CC_CDX_REGEX_COLUMNS.find(col_name) == CC_CDX_REGEX_COLUMNS.end()) {
+		return false;
+	}
+
+	vector<string> values;
+	// children[0] is the column ref, children[1..n] are the values
+	for (size_t i = 1; i < op.children.size(); i++) {
+		if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return false; // Non-constant value, can't push down
+		}
+		auto &constant = op.children[i]->Cast<BoundConstantExpression>();
+		if (is_integer) {
+			if (constant.value.type().id() != LogicalTypeId::INTEGER &&
+			    constant.value.type().id() != LogicalTypeId::BIGINT) {
+				return false;
+			}
+			values.push_back(to_string(constant.value.GetValue<int32_t>()));
+		} else {
+			if (constant.value.type().id() != LogicalTypeId::VARCHAR) {
+				return false;
+			}
+			values.push_back(constant.value.ToString());
+		}
+	}
+
+	if (values.empty()) {
+		return false;
+	}
+
+	// Build regex alternation: (val1|val2|val3)
+	string regex_pattern = "(";
+	for (size_t i = 0; i < values.size(); i++) {
+		if (i > 0) regex_pattern += "|";
+		regex_pattern += values[i];
+	}
+	regex_pattern += ")";
+
+	string cdx_field = MapColumnToCdxFilterField(col_name);
+	string filter_str = "~" + cdx_field + ":" + regex_pattern;
+	bind_data.cdx_filters.push_back(filter_str);
+	DUCKDB_LOG_DEBUG(context, "%s IN pushdown: %s +%.0fms", col_name.c_str(), filter_str.c_str(), ElapsedMs());
+	return true;
+}
+
 // Filter pushdown function to handle WHERE clauses
 static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                vector<unique_ptr<Expression>> &filters) {
@@ -655,12 +783,28 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
 
-			// Check if first child is a crawl_id column and rest are constants
+			// Check if first child is a column and rest are constants
 			if (op.children.size() >= 2 &&
 			    op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "crawl_id") {
+				// Handle statuscode IN (200, 301, 302) -> ~status:(200|301|302)
+				if (col_name == "statuscode") {
+					if (TryHandleInExpression(context, bind_data, op, col_name, true)) {
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+				// Handle mimetype IN ('text/html', 'application/json') -> ~mime:(text/html|application/json)
+				else if (col_name == "mimetype") {
+					if (TryHandleInExpression(context, bind_data, op, col_name, false)) {
+						filters_to_remove.push_back(i);
+						continue;
+					}
+				}
+				// Handle crawl_id IN (...)
+				else if (col_name == "crawl_id") {
 					vector<string> crawl_id_values;
 					bool all_constants = true;
 
@@ -772,13 +916,23 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
 
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string prefix_string = constant.value.ToString();
-						// Convert to CDX wildcard pattern: prefix_string*
-						bind_data.url_filter = prefix_string + "*";
-						DUCKDB_LOG_DEBUG(context, "PREFIX URL filter: '%s' -> '%s'", prefix_string.c_str(), bind_data.url_filter.c_str());
-						filters_to_remove.push_back(i);
-						continue;
+						if (column_name == "url") {
+							// Convert to CDX wildcard pattern: prefix_string*
+							bind_data.url_filter = prefix_string + "*";
+							DUCKDB_LOG_DEBUG(context, "PREFIX URL filter: '%s' -> '%s'", prefix_string.c_str(), bind_data.url_filter.c_str());
+							filters_to_remove.push_back(i);
+							continue;
+						}
+						// Handle mimetype/statuscode prefix patterns -> regex ^prefix_string.*
+						else if (CC_CDX_REGEX_COLUMNS.find(column_name) != CC_CDX_REGEX_COLUMNS.end()) {
+							string regex_pattern = "^" + EscapeRegexSpecialChars(prefix_string) + ".*";
+							if (TryAddCdxRegexFilter(context, bind_data, column_name, regex_pattern, "PREFIX")) {
+								filters_to_remove.push_back(i);
+								continue;
+							}
+						}
 					}
 				}
 			}
@@ -814,14 +968,99 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 					string column_name = col_ref.GetName();
 
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string original_pattern = constant.value.ToString();
-						// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
-						bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
-						DUCKDB_LOG_DEBUG(context, "LIKE URL filter: '%s' -> '%s'", original_pattern.c_str(), bind_data.url_filter.c_str());
-						filters_to_remove.push_back(i);
-						continue;
+
+						if (column_name == "url") {
+							// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
+							bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
+							DUCKDB_LOG_DEBUG(context, "LIKE URL filter: '%s' -> '%s'", original_pattern.c_str(), bind_data.url_filter.c_str());
+							filters_to_remove.push_back(i);
+							continue;
+						}
+						// Handle mimetype LIKE 'text/%' -> ~mime:^text/.*$
+						else if (column_name == "mimetype") {
+							string regex_pattern = SqlRegexToRegex(original_pattern);
+							if (TryAddCdxRegexFilter(context, bind_data, column_name, regex_pattern, "LIKE")) {
+								filters_to_remove.push_back(i);
+								continue;
+							}
+						}
 					}
+				}
+			}
+			// Check if this is a SIMILAR TO function (regexp_matches / regexp_full_match)
+			// Used for regex matching on statuscode/mimetype columns
+			else if (func.function.name == "regexp_matches" || func.function.name == "regexp_full_match") {
+				if (func.children.size() >= 2 &&
+				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+
+					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+					string column_name = col_ref.GetName();
+
+					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						string regex_pattern = constant.value.ToString();
+						// Try to push down regex filter for statuscode/mimetype
+						if (TryAddCdxRegexFilter(context, bind_data, column_name, regex_pattern, "SIMILAR TO")) {
+							filters_to_remove.push_back(i);
+							continue;
+						}
+					}
+				}
+			}
+		}
+
+		// Handle BOUND_BETWEEN for timestamp range (e.g., timestamp BETWEEN '2025-11-12' AND '2025-11-14')
+		// DuckDB also converts `timestamp >= X AND timestamp < Y` to BETWEEN
+		if (filter->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
+			auto &between = filter->Cast<BoundBetweenExpression>();
+
+			// Check if input is a timestamp column reference
+			if (between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = between.input->Cast<BoundColumnRefExpression>();
+
+				if (col_ref.GetName() == "timestamp") {
+					// Extract lower bound
+					if (between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+						auto &lower_const = between.lower->Cast<BoundConstantExpression>();
+						timestamp_t lower_ts;
+						if (lower_const.value.type().id() == LogicalTypeId::TIMESTAMP ||
+						    lower_const.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+							lower_ts = timestamp_t(lower_const.value.GetValue<int64_t>());
+						} else if (lower_const.value.type().id() == LogicalTypeId::VARCHAR) {
+							lower_ts = Timestamp::FromString(lower_const.value.ToString(), false);
+						} else {
+							lower_ts = timestamp_t(0);
+						}
+						if (lower_ts.value != 0) {
+							bind_data.timestamp_from = lower_ts;
+							bind_data.has_timestamp_filter = true;
+							DUCKDB_LOG_DEBUG(context, "BETWEEN timestamp FROM: %s", Timestamp::ToString(lower_ts).c_str());
+						}
+					}
+
+					// Extract upper bound
+					if (between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+						auto &upper_const = between.upper->Cast<BoundConstantExpression>();
+						timestamp_t upper_ts;
+						if (upper_const.value.type().id() == LogicalTypeId::TIMESTAMP ||
+						    upper_const.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+							upper_ts = timestamp_t(upper_const.value.GetValue<int64_t>());
+						} else if (upper_const.value.type().id() == LogicalTypeId::VARCHAR) {
+							upper_ts = Timestamp::FromString(upper_const.value.ToString(), false);
+						} else {
+							upper_ts = timestamp_t(0);
+						}
+						if (upper_ts.value != 0) {
+							bind_data.timestamp_to = upper_ts;
+							bind_data.has_timestamp_filter = true;
+							DUCKDB_LOG_DEBUG(context, "BETWEEN timestamp TO: %s", Timestamp::ToString(upper_ts).c_str());
+						}
+					}
+					// Don't remove filter - DuckDB will still apply it for exact row filtering
+					continue;
 				}
 			}
 		}
@@ -924,17 +1163,18 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			}
 		}
 		// Handle statuscode filtering (uses CDX filter parameter)
-		// CDX API syntax: filter==statuscode:200 means &filter==statuscode:200
-		// (one = for parameter, one = for exact match operator)
+		// CDX API syntax: filter==status:200 means &filter==status:200
+		// NOTE: Common Crawl uses 'status' field name (not 'statuscode')
 		else if (column_name == "statuscode" &&
 		         (constant.value.type().id() == LogicalTypeId::INTEGER ||
 		          constant.value.type().id() == LogicalTypeId::BIGINT)) {
 			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
-			string filter_str = op + "statuscode:" + to_string(constant.value.GetValue<int32_t>());
+			string filter_str = op + "status:" + to_string(constant.value.GetValue<int32_t>());
 			bind_data.cdx_filters.push_back(filter_str);
 			filters_to_remove.push_back(i);
 		}
 		// Handle mimetype filtering (uses CDX filter parameter)
+		// NOTE: Common Crawl uses 'mime' field name (not 'mimetype')
 		else if (column_name == "mimetype" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
 			string filter_str = op + "mime:" + constant.value.ToString();

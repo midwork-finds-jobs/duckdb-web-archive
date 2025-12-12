@@ -21,9 +21,6 @@ void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOper
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	fprintf(stderr, "\n[DEBUG] *** COMMON_CRAWL EXTENSION LOADING ***\n");
-	fflush(stderr);
-
 	// Note: httpfs extension must be loaded before using this extension
 	// Users should run: INSTALL httpfs; LOAD httpfs; before loading this extension
 	// Or set autoload_known_extensions=1 and autoinstall_known_extensions=1
@@ -39,7 +36,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	OptimizerExtension optimizer;
 	optimizer.optimize_function = CommonCrawlOptimizer;
 	config.optimizer_extensions.push_back(std::move(optimizer));
-	fprintf(stderr, "[DEBUG] Optimizer extension registered for LIMIT pushdown\n");
 }
 
 void CommonCrawlExtension::Load(ExtensionLoader &loader) {

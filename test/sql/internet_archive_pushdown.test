@@ -390,3 +390,26 @@ LIMIT 10;
 ----
 true
 
+# ============================================
+# STAR WILDCARD IN SIMILAR TO TESTS
+# ============================================
+
+# Test urlkey NOT SIMILAR TO with * wildcard converts to .* in regex
+# Pattern: a/* should become a/.* in the CDX regex
+query I
+SELECT cdx_url LIKE '%filter=!urlkey:%' AND cdx_url LIKE '%/.*%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND urlkey NOT SIMILAR TO 'a/*/*'
+LIMIT 1;
+----
+true
+
+# Test urlkey SIMILAR TO with * wildcard converts to .* in regex
+query I
+SELECT cdx_url LIKE '%filter=urlkey:^test/.*$%' FROM internet_archive()
+WHERE url = 'example.com/*'
+  AND urlkey SIMILAR TO 'test/*'
+LIMIT 1;
+----
+true
+

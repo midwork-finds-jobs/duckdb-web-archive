@@ -511,10 +511,11 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 static const std::set<string> CDX_REGEX_COLUMNS = {"urlkey", "mimetype", "statuscode"};
 
 // Convert SQL SIMILAR TO pattern to Java regex (anchored)
+// Handles: % -> .*, _ -> ., * -> .*
 static string SqlRegexToJavaRegex(const string &sql_regex) {
 	string regex = "^";
 	for (char c : sql_regex) {
-		if (c == '%') {
+		if (c == '%' || c == '*') {
 			regex += ".*";
 		} else if (c == '_') {
 			regex += ".";
@@ -862,17 +863,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string sql_regex = constant.value.ToString();
-						string regex_pattern = "^";
-						for (char c : sql_regex) {
-							if (c == '%') {
-								regex_pattern += ".*";
-							} else if (c == '_') {
-								regex_pattern += ".";
-							} else {
-								regex_pattern += c;
-							}
-						}
-						regex_pattern += "$";
+						string regex_pattern = SqlRegexToJavaRegex(sql_regex);
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
 						fprintf(stderr, "[DEBUG +%.0fms] urlkey NOT SIMILAR TO: %s -> %s\n", ElapsedMs(), sql_regex.c_str(), filter_str.c_str());

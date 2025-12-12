@@ -1043,8 +1043,17 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 						string regex_pattern = constant.value.ToString();
 
 						// Handle url SIMILAR TO -> ~url:regex
+						// DuckDB already converts SIMILAR TO to regex, so just add anchors
 						if (column_name == "url") {
-							string filter_str = "~url:" + regex_pattern;
+							// Add anchors if not present (regexp_full_match is implicitly anchored)
+							string anchored_regex = regex_pattern;
+							if (anchored_regex.empty() || anchored_regex[0] != '^') {
+								anchored_regex = "^" + anchored_regex;
+							}
+							if (anchored_regex.empty() || anchored_regex.back() != '$') {
+								anchored_regex = anchored_regex + "$";
+							}
+							string filter_str = "~url:" + anchored_regex;
 							bind_data.cdx_filters.push_back(filter_str);
 							DUCKDB_LOG_DEBUG(context, "url SIMILAR TO: '%s' -> %s", regex_pattern.c_str(), filter_str.c_str());
 							filters_to_remove.push_back(i);
@@ -1114,6 +1123,7 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 				// NOT regexp_matches(url, 'pattern') or NOT regexp_full_match(url, 'pattern') -> !~url:regex
 				// This handles NOT SIMILAR TO for the url column
+				// DuckDB already converts SIMILAR TO to regex, so just add anchors
 				if ((inner_func.function.name == "regexp_matches" || inner_func.function.name == "regexp_full_match") &&
 				    inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -1125,7 +1135,15 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 						string regex_pattern = constant.value.ToString();
-						string filter_str = "!~url:" + regex_pattern;
+						// Add anchors if not present
+						string anchored_regex = regex_pattern;
+						if (anchored_regex.empty() || anchored_regex[0] != '^') {
+							anchored_regex = "^" + anchored_regex;
+						}
+						if (anchored_regex.empty() || anchored_regex.back() != '$') {
+							anchored_regex = anchored_regex + "$";
+						}
+						string filter_str = "!~url:" + anchored_regex;
 						bind_data.cdx_filters.push_back(filter_str);
 						DUCKDB_LOG_DEBUG(context, "url NOT SIMILAR TO: '%s' -> %s", regex_pattern.c_str(), filter_str.c_str());
 						filters_to_remove.push_back(i);

@@ -57,7 +57,7 @@ SELECT column_name, column_type FROM (
 ) WHERE column_name IN ('warc', 'response')
 ORDER BY column_name;
 ----
-response	STRUCT(body BLOB, headers MAP(VARCHAR, VARCHAR), http_version VARCHAR)
+response	STRUCT(body BLOB, headers MAP(VARCHAR, VARCHAR), http_version VARCHAR, "error" VARCHAR)
 warc	STRUCT("version" VARCHAR, headers MAP(VARCHAR, VARCHAR))
 
 # Test that internet_archive function exists

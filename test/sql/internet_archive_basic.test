@@ -158,3 +158,10 @@ statement ok
 SELECT archive_url FROM wayback_machine()
 WHERE url = 'archive.org'
 LIMIT 0;
+
+# Test DISTINCT ON(digest) pushes down collapse=digest to CDX API
+query I
+SELECT cdx_url LIKE '%&collapse=digest%' AS has_collapse
+FROM (SELECT DISTINCT ON(digest) cdx_url FROM wayback_machine(debug := true) WHERE url = 'archive.org');
+----
+true

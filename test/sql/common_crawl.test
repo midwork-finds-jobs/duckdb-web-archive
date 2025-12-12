@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl.test
 # description: test common_crawl extension
-# group: [common_crawl]
+# group: [sql]
 
 # Require statement will ensure this test is run with this extension loaded
 require web_archive_cdx

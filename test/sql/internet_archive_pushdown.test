@@ -1,6 +1,6 @@
 # name: test/sql/internet_archive_pushdown.test
 # description: Tests for internet_archive filter and limit pushdown using cdx_url column
-# group: [internet_archive]
+# group: [sql]
 
 # NOTE: When only cdx_url is selected with debug := true, no network request is made.
 # This allows testing URL construction without httpfs or network access.

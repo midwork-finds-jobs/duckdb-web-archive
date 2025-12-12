@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_basic.test
 # description: Basic tests for common_crawl_index function
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

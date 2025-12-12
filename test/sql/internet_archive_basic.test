@@ -1,6 +1,6 @@
 # name: test/sql/internet_archive_basic.test
 # description: Basic tests for internet_archive function
-# group: [internet_archive]
+# group: [sql]
 
 require web_archive_cdx
 
@@ -53,13 +53,13 @@ statuscode	INTEGER
 url	VARCHAR
 urlkey	VARCHAR
 
-# Test response column type (STRUCT with body for wayback_machine)
+# Test response column type (STRUCT with body and error for wayback_machine)
 query II
 SELECT column_name, column_type FROM (
     DESCRIBE SELECT * FROM wayback_machine()
 ) WHERE column_name = 'response';
 ----
-response	STRUCT(body BLOB)
+response	STRUCT(body BLOB, "error" VARCHAR)
 
 # Test named parameter max_results
 statement ok

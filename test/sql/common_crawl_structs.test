@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_structs.test
 # description: Test STRUCT and MAP types in common_crawl_index
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

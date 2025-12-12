@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_errors.test
 # description: Test error handling and edge cases
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

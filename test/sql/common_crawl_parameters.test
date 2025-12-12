@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_parameters.test
 # description: Test named parameters for common_crawl_index and internet_archive
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

@@ -1,6 +1,6 @@
 # name: test/sql/internet_archive_fast_latest.test
 # description: Tests for internet_archive ORDER BY timestamp DESC fastLatest pushdown
-# group: [internet_archive]
+# group: [sql]
 
 # These tests require httpfs for network access to verify actual responses
 require web_archive_cdx

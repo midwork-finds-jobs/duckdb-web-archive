@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_limit.test
 # description: Test LIMIT pushdown for common_crawl_index
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

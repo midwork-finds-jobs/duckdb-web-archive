@@ -1,6 +1,6 @@
 # name: test/sql/common_crawl_integration.test
 # description: Integration tests combining multiple features
-# group: [common_crawl]
+# group: [sql]
 
 require web_archive_cdx
 

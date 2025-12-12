@@ -12,6 +12,8 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_top_n.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 
 namespace duckdb {
 
@@ -1370,6 +1372,102 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 	// Recurse into children
 	for (auto &child : op->children) {
 		OptimizeWaybackMachineLimitPushdown(child);
+	}
+}
+
+// ========================================
+// DISTINCT ON PUSHDOWN OPTIMIZER
+// ========================================
+
+// Helper to check if a DISTINCT ON targets a specific column by name
+static bool IsDistinctOnColumn(const LogicalDistinct &distinct, const string &column_name) {
+	if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
+		return false;
+	}
+	// Check each distinct target
+	for (const auto &target : distinct.distinct_targets) {
+		if (target->GetExpressionClass() == ExpressionClass::BOUND_REF) {
+			auto &bound_ref = target->Cast<BoundReferenceExpression>();
+			// Check alias (which contains the column name in DuckDB)
+			if (bound_ref.alias == column_name) {
+				return true;
+			}
+		} else if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			auto &col_ref = target->Cast<BoundColumnRefExpression>();
+			if (col_ref.GetName() == column_name || col_ref.alias == column_name) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Optimizer function to push down DISTINCT ON(digest) to collapse parameter
+void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
+	// Handle DISTINCT ON
+	if (op->type == LogicalOperatorType::LOGICAL_DISTINCT) {
+		auto &distinct = op->Cast<LogicalDistinct>();
+
+		// Only handle DISTINCT ON, not regular DISTINCT
+		if (distinct.distinct_type != DistinctType::DISTINCT_ON) {
+			// Recurse into children
+			for (auto &child : op->children) {
+				OptimizeWaybackMachineDistinctOnPushdown(child);
+			}
+			return;
+		}
+
+		// Check if this is DISTINCT ON(digest)
+		if (!IsDistinctOnColumn(distinct, "digest")) {
+			// Not digest, recurse
+			for (auto &child : op->children) {
+				OptimizeWaybackMachineDistinctOnPushdown(child);
+			}
+			return;
+		}
+
+		// Find the GET node (skip projections, filters)
+		reference<LogicalOperator> child = *op->children[0];
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION ||
+		       child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
+			child = *child.get().children[0];
+		}
+
+		if (child.get().type != LogicalOperatorType::LOGICAL_GET) {
+			for (auto &c : op->children) {
+				OptimizeWaybackMachineDistinctOnPushdown(c);
+			}
+			return;
+		}
+
+		auto &get = child.get().Cast<LogicalGet>();
+		if (get.function.name != "wayback_machine") {
+			for (auto &c : op->children) {
+				OptimizeWaybackMachineDistinctOnPushdown(c);
+			}
+			return;
+		}
+
+		// Found DISTINCT ON(digest) over wayback_machine!
+		// Set collapse parameter in bind_data
+		auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
+		if (bind_data.collapse.empty()) {
+			bind_data.collapse = "digest";
+			// Note: We keep the DISTINCT ON in the plan because the CDX API collapse
+			// returns results but they may not be perfectly deduplicated when combined
+			// with other filters. DuckDB's DISTINCT ON ensures correctness.
+		}
+
+		// Recurse into children
+		for (auto &c : op->children) {
+			OptimizeWaybackMachineDistinctOnPushdown(c);
+		}
+		return;
+	}
+
+	// Recurse into children
+	for (auto &child : op->children) {
+		OptimizeWaybackMachineDistinctOnPushdown(child);
 	}
 }
 

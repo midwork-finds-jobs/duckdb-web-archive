@@ -1537,6 +1537,7 @@ void RegisterCommonCrawlFunction(ExtensionLoader &loader) {
 	// Add named parameters
 	func.named_parameters["max_results"] = LogicalType::BIGINT;
 	func.named_parameters["debug"] = LogicalType::BOOLEAN;
+	func.named_parameters["timeout"] = LogicalType::BIGINT;
 
 	common_crawl_set.AddFunction(func);
 

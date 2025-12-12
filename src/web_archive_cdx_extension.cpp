@@ -13,11 +13,13 @@ namespace duckdb {
 // Forward declarations from common_crawl_index.cpp and wayback_machine (internet_archive.cpp)
 void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op);
 void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op);
+void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op);
 
 // Combined optimizer for both table functions
 void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	OptimizeCommonCrawlLimitPushdown(plan);
 	OptimizeWaybackMachineLimitPushdown(plan);
+	OptimizeWaybackMachineDistinctOnPushdown(plan);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {

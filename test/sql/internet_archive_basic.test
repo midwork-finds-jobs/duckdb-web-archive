@@ -17,9 +17,9 @@ SELECT column_name FROM (
 cdx_url
 digest
 length
-mime_type
+mimetype
 response
-status_code
+statuscode
 timestamp
 url
 urlkey
@@ -28,11 +28,11 @@ urlkey
 query II
 SELECT column_name, column_type FROM (
     DESCRIBE SELECT * FROM internet_archive()
-) WHERE column_name IN ('url', 'status_code', 'length', 'urlkey')
+) WHERE column_name IN ('url', 'statuscode', 'length', 'urlkey')
 ORDER BY column_name;
 ----
 length	BIGINT
-status_code	INTEGER
+statuscode	INTEGER
 url	VARCHAR
 urlkey	VARCHAR
 
@@ -63,10 +63,10 @@ url
 # Test projection - multiple columns
 query I
 SELECT column_name FROM (
-    DESCRIBE SELECT url, status_code, timestamp FROM internet_archive()
+    DESCRIBE SELECT url, statuscode, timestamp FROM internet_archive()
 ) ORDER BY column_name;
 ----
-status_code
+statuscode
 timestamp
 url
 
@@ -88,24 +88,24 @@ SELECT * FROM internet_archive()
 WHERE url LIKE '%.archive.org'
 LIMIT 0;
 
-# Test WHERE clause with status_code
+# Test WHERE clause with statuscode
 statement ok
 SELECT * FROM internet_archive()
-WHERE status_code = 200
+WHERE statuscode = 200
 LIMIT 0;
 
-# Test WHERE clause with mime_type
+# Test WHERE clause with mimetype
 statement ok
 SELECT * FROM internet_archive()
-WHERE mime_type = 'text/html'
+WHERE mimetype = 'text/html'
 LIMIT 0;
 
 # Test multiple WHERE conditions
 statement ok
 SELECT * FROM internet_archive()
 WHERE url = 'archive.org'
-  AND status_code = 200
-  AND mime_type = 'text/html'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
 LIMIT 0;
 
 # Test LIMIT
@@ -118,7 +118,7 @@ LIMIT 0;
 statement ok
 SELECT url, octet_length(response) as size FROM internet_archive()
 WHERE url = 'archive.org'
-  AND status_code = 200
+  AND statuscode = 200
 LIMIT 0;
 
 # Test timestamp column

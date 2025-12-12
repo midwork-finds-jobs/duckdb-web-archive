@@ -29,10 +29,10 @@ crawl_id
 digest
 filename
 length
-mime_type
+mimetype
 offset
 response
-status_code
+statuscode
 timestamp
 url
 warc
@@ -41,13 +41,13 @@ warc
 query II
 SELECT column_name, column_type FROM (
     DESCRIBE SELECT * FROM common_crawl_index()
-) WHERE column_name IN ('url', 'status_code', 'offset', 'length', 'crawl_id')
+) WHERE column_name IN ('url', 'statuscode', 'offset', 'length', 'crawl_id')
 ORDER BY column_name;
 ----
 crawl_id	VARCHAR
 length	BIGINT
 offset	BIGINT
-status_code	INTEGER
+statuscode	INTEGER
 url	VARCHAR
 
 # Test that STRUCT columns exist with correct types
@@ -73,9 +73,9 @@ SELECT column_name FROM (
 cdx_url
 digest
 length
-mime_type
+mimetype
 response
-status_code
+statuscode
 timestamp
 url
 urlkey
@@ -90,19 +90,19 @@ SELECT * FROM internet_archive(max_results := 10) LIMIT 0;
 
 # Test projection pushdown
 statement ok
-SELECT url, status_code FROM common_crawl_index() LIMIT 0;
+SELECT url, statuscode FROM common_crawl_index() LIMIT 0;
 
 # Test filter pushdown
 statement ok
 SELECT * FROM common_crawl_index()
-WHERE status_code = 200
-  AND mime_type = 'text/html'
+WHERE statuscode = 200
+  AND mimetype = 'text/html'
 LIMIT 0;
 
 # Test LIMIT pushdown
 statement ok
 SELECT * FROM common_crawl_index()
-WHERE status_code = 200
+WHERE statuscode = 200
 LIMIT 0;
 
 # Test accessing STRUCT fields

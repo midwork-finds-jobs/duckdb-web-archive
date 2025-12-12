@@ -11,8 +11,8 @@ SELECT response, url
 FROM common_crawl_index()
 WHERE crawl_id = 'CC-MAIN-2025-43'   -- Specify crawl via WHERE (defaults to latest)
   AND url LIKE '*.example.com/*'  -- URL filtering via WHERE clause
-  AND status_code = 200              -- Pushed down to CDX API as filter
-  AND mime_type != 'application/pdf' -- Pushed down to CDX API as filter
+  AND statuscode = 200              -- Pushed down to CDX API as filter
+  AND mimetype != 'application/pdf' -- Pushed down to CDX API as filter
 LIMIT 10;                            -- LIMIT is automatically pushed down to CDX API
 ```
 
@@ -42,18 +42,18 @@ All common crawl indexes and their metadata can be found from: https://index.com
 
 ```sql
 -- Query archived snapshots with automatic LIMIT pushdown
-SELECT url, timestamp, mime_type, status_code
+SELECT url, timestamp, mimetype, statuscode
 FROM internet_archive()
 WHERE url = 'archive.org'       -- Exact URL match
-  AND status_code = 200          -- Only successful responses
-  AND mime_type = 'text/html'    -- Only HTML pages
+  AND statuscode = 200          -- Only successful responses
+  AND mimetype = 'text/html'    -- Only HTML pages
 LIMIT 10;                        -- LIMIT automatically pushed to CDX API
 
 -- Fetch archived page content
 SELECT url, timestamp, response
 FROM internet_archive()
 WHERE url = 'archive.org/about/'
-  AND status_code = 200
+  AND statuscode = 200
 ORDER BY timestamp DESC
 LIMIT 1;
 

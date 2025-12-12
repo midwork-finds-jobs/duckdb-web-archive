@@ -64,7 +64,7 @@ SELECT
 FROM (
     SELECT cdx_url FROM internet_archive()
     WHERE url = 'example.com'
-      AND status_code = 200
+      AND statuscode = 200
     ORDER BY timestamp DESC
     LIMIT 5
 ) LIMIT 1;

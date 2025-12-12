@@ -55,8 +55,8 @@ static vector<CDXRecord> QueryCDXAPI(ClientContext &context, const string &index
 
 	// Helper lambda to map DuckDB column names to CDX API field names
 	auto map_column_to_field = [](const string &col_name) -> string {
-		if (col_name == "mime_type") return "mime";
-		if (col_name == "status_code") return "status";
+		if (col_name == "mimetype") return "mime";
+		if (col_name == "statuscode") return "status";
 		return col_name; // url, digest, timestamp, filename, offset, length stay the same
 	};
 
@@ -261,13 +261,13 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	return_types.push_back(LogicalType::TIMESTAMP_TZ);
 	bind_data->fields_needed.push_back("timestamp");
 
-	names.push_back("mime_type");
+	names.push_back("mimetype");
 	return_types.push_back(LogicalType::VARCHAR);
-	bind_data->fields_needed.push_back("mime_type");
+	bind_data->fields_needed.push_back("mimetype");
 
-	names.push_back("status_code");
+	names.push_back("statuscode");
 	return_types.push_back(LogicalType::INTEGER);
-	bind_data->fields_needed.push_back("status_code");
+	bind_data->fields_needed.push_back("statuscode");
 
 	names.push_back("digest");
 	return_types.push_back(LogicalType::VARCHAR);
@@ -342,7 +342,7 @@ static unique_ptr<GlobalTableFunctionState> CommonCrawlInitGlobal(ClientContext 
 	// CDX API fields that can be requested from index.commoncrawl.org
 	// All other columns are computed by our extension
 	static const std::unordered_set<string> cdx_fields = {
-		"url", "timestamp", "mime_type", "status_code",
+		"url", "timestamp", "mimetype", "statuscode",
 		"digest", "filename", "offset", "length"
 	};
 
@@ -482,10 +482,10 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 				} else if (col_name == "timestamp") {
 					auto data_ptr = FlatVector::GetData<timestamp_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = ParseCDXTimestamp(record.timestamp);
-				} else if (col_name == "mime_type") {
+				} else if (col_name == "mimetype") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));
-				} else if (col_name == "status_code") {
+				} else if (col_name == "statuscode") {
 					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.status_code;
 				} else if (col_name == "digest") {
@@ -812,10 +812,10 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				filters_to_remove.push_back(i);
 			}
 		}
-		// Handle status_code filtering (uses CDX filter parameter)
+		// Handle statuscode filtering (uses CDX filter parameter)
 		// CDX API syntax: filter==statuscode:200 means &filter==statuscode:200
 		// (one = for parameter, one = for exact match operator)
-		else if (column_name == "status_code" &&
+		else if (column_name == "statuscode" &&
 		         (constant.value.type().id() == LogicalTypeId::INTEGER ||
 		          constant.value.type().id() == LogicalTypeId::BIGINT)) {
 			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
@@ -823,8 +823,8 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			bind_data.cdx_filters.push_back(filter_str);
 			filters_to_remove.push_back(i);
 		}
-		// Handle mime_type filtering (uses CDX filter parameter)
-		else if (column_name == "mime_type" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+		// Handle mimetype filtering (uses CDX filter parameter)
+		else if (column_name == "mimetype" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
 			string filter_str = op + "mime:" + constant.value.ToString();
 			bind_data.cdx_filters.push_back(filter_str);

@@ -1,4 +1,5 @@
 #include "common_crawl_utils.hpp"
+#include <set>
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -316,11 +317,11 @@ static unique_ptr<FunctionData> InternetArchiveBind(ClientContext &context, Tabl
 	return_types.push_back(LogicalType::VARCHAR);
 	bind_data->fields_needed.push_back("urlkey");
 
-	names.push_back("mime_type");
+	names.push_back("mimetype");
 	return_types.push_back(LogicalType::VARCHAR);
 	bind_data->fields_needed.push_back("mimetype");
 
-	names.push_back("status_code");
+	names.push_back("statuscode");
 	return_types.push_back(LogicalType::INTEGER);
 	bind_data->fields_needed.push_back("statuscode");
 
@@ -372,9 +373,9 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 				bind_data.fields_needed.push_back("timestamp");
 			} else if (col_name == "urlkey") {
 				bind_data.fields_needed.push_back("urlkey");
-			} else if (col_name == "mime_type") {
+			} else if (col_name == "mimetype") {
 				bind_data.fields_needed.push_back("mimetype");
-			} else if (col_name == "status_code") {
+			} else if (col_name == "statuscode") {
 				bind_data.fields_needed.push_back("statuscode");
 			} else if (col_name == "digest") {
 				bind_data.fields_needed.push_back("digest");
@@ -412,7 +413,7 @@ static unique_ptr<GlobalTableFunctionState> InternetArchiveInitGlobal(ClientCont
 		                                     bind_data.collapse, bind_data.fast_latest, bind_data.offset, bind_data.cdx_url);
 	}
 
-	fprintf(stderr, "[DEBUG] QueryArchiveOrgCDX returned %lu records\n", (unsigned long)state->records.size());
+	fprintf(stderr, "[DEBUG +%.0fms] QueryArchiveOrgCDX returned %lu records\n", ElapsedMs(), (unsigned long)state->records.size());
 
 	return std::move(state);
 }
@@ -466,10 +467,10 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 				} else if (col_name == "urlkey") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.urlkey));
-				} else if (col_name == "mime_type") {
+				} else if (col_name == "mimetype") {
 					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));
-				} else if (col_name == "status_code") {
+				} else if (col_name == "statuscode") {
 					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.status_code;
 				} else if (col_name == "digest") {
@@ -506,6 +507,54 @@ static void InternetArchiveScan(ClientContext &context, TableFunctionInput &data
 // FILTER PUSHDOWN
 // ========================================
 
+// Columns that support CDX regex filtering
+static const std::set<string> CDX_REGEX_COLUMNS = {"urlkey", "mimetype", "statuscode"};
+
+// Convert SQL SIMILAR TO pattern to Java regex (anchored)
+static string SqlRegexToJavaRegex(const string &sql_regex) {
+	string regex = "^";
+	for (char c : sql_regex) {
+		if (c == '%') {
+			regex += ".*";
+		} else if (c == '_') {
+			regex += ".";
+		} else {
+			regex += c;
+		}
+	}
+	regex += "$";
+	return regex;
+}
+
+// Escape regex special characters for contains() patterns
+static string EscapeRegex(const string &val) {
+	string escaped;
+	for (char c : val) {
+		if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
+		    c == '{' || c == '}' || c == '+' || c == '?' || c == '^' ||
+		    c == '$' || c == '|' || c == '\\' || c == '*') {
+			escaped += '\\';
+		}
+		escaped += c;
+	}
+	return escaped;
+}
+
+// Helper to check if column supports CDX regex and add filter
+// Returns true if filter was added
+static bool TryAddCdxRegexFilter(InternetArchiveBindData &bind_data, const string &col_name,
+                                   const string &filter_pattern, const string &debug_label,
+                                   bool negate = false) {
+	if (CDX_REGEX_COLUMNS.find(col_name) == CDX_REGEX_COLUMNS.end()) {
+		return false;
+	}
+	string filter_str = (negate ? "!" : "") + col_name + ":" + filter_pattern;
+	bind_data.cdx_filters.push_back(filter_str);
+	fprintf(stderr, "[DEBUG +%.0fms] %s %s: %s\n", ElapsedMs(),
+	        col_name.c_str(), debug_label.c_str(), filter_str.c_str());
+	return true;
+}
+
 // Filter pushdown for internet_archive
 static void InternetArchivePushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
                                                    vector<unique_ptr<Expression>> &filters) {
@@ -527,7 +576,7 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &func = filter->Cast<BoundFunctionExpression>();
 
-			// Handle LIKE for url column
+			// Handle LIKE for url column - just replace % with * for CDX API
 			if ((func.function.name == "like" || func.function.name == "~~") &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -538,36 +587,30 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				if (col_ref.GetName() == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					bind_data.url_filter = constant.value.ToString();
-
-					// Detect matchType from pattern
-					if (bind_data.url_filter.find("*") == 0) {
-						bind_data.match_type = "domain";
-						bind_data.url_filter = bind_data.url_filter.substr(1); // Remove leading *
-					} else if (bind_data.url_filter.find("/*") != string::npos) {
-						bind_data.match_type = "prefix";
-						bind_data.url_filter = bind_data.url_filter.substr(0, bind_data.url_filter.find("/*"));
+					// Replace SQL % wildcards with CDX API * wildcards
+					for (size_t pos = 0; pos < bind_data.url_filter.size(); ++pos) {
+						if (bind_data.url_filter[pos] == '%') {
+							bind_data.url_filter[pos] = '*';
+						}
 					}
-
-					fprintf(stderr, "[DEBUG] URL filter: %s, matchType: %s\n",
-					        bind_data.url_filter.c_str(), bind_data.match_type.c_str());
+					fprintf(stderr, "[DEBUG +%.0fms] URL LIKE: %s\n", ElapsedMs(), bind_data.url_filter.c_str());
 					filters_to_remove.push_back(i);
 					continue;
 				}
 
-				// Handle LIKE for urlkey column: urlkey LIKE '%apply' -> filter=urlkey:.*apply$
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+				// Handle LIKE for CDX regex columns
+				string col_name = col_ref.GetName();
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string like_pattern = constant.value.ToString();
 					string regex_pattern = LikeToRegex(like_pattern);
-					string filter_str = "urlkey:" + regex_pattern;
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey LIKE: %s -> %s\n", ElapsedMs(), like_pattern.c_str(), filter_str.c_str());
+					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "LIKE");
 					filters_to_remove.push_back(i);
 					continue;
 				}
 			}
 
-			// Handle suffix(urlkey, 'pattern') -> filter=urlkey:.*pattern$
-			// DuckDB optimizes LIKE '%x' to suffix()
+			// Handle suffix() - DuckDB optimizes LIKE '%x' to suffix()
 			if (func.function.name == "suffix" &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -575,19 +618,18 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string suffix_val = constant.value.ToString();
-					string filter_str = "urlkey:.*" + suffix_val + "$";
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey suffix: %s\n", ElapsedMs(), filter_str.c_str());
+					TryAddCdxRegexFilter(bind_data, col_name, ".*" + suffix_val + "$", "suffix");
 					filters_to_remove.push_back(i);
 					continue;
 				}
 			}
 
-			// Handle prefix(urlkey, 'pattern') -> filter=urlkey:^pattern.*
-			// DuckDB optimizes LIKE 'x%' to prefix()
+			// Handle prefix() - DuckDB optimizes LIKE 'x%' to prefix()
 			if (func.function.name == "prefix" &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -595,19 +637,27 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+				// Handle prefix(url, 'pattern') -> url=pattern* (special case)
+				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					bind_data.url_filter = constant.value.ToString() + "*";
+					fprintf(stderr, "[DEBUG +%.0fms] URL prefix: %s\n", ElapsedMs(), bind_data.url_filter.c_str());
+					filters_to_remove.push_back(i);
+					continue;
+				}
+
+				// Handle prefix for CDX regex columns
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string prefix_val = constant.value.ToString();
-					string filter_str = "urlkey:^" + prefix_val + ".*";
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey prefix: %s\n", ElapsedMs(), filter_str.c_str());
+					TryAddCdxRegexFilter(bind_data, col_name, "^" + prefix_val + ".*", "prefix");
 					filters_to_remove.push_back(i);
 					continue;
 				}
 			}
 
-			// Handle contains(urlkey, 'pattern') -> filter=urlkey:.*pattern.*
-			// DuckDB optimizes LIKE '%x%' to contains()
+			// Handle contains() - DuckDB optimizes LIKE '%x%' to contains()
 			if (func.function.name == "contains" &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -615,28 +665,18 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string contains_val = constant.value.ToString();
-					// Escape regex special chars in the search string
-					string escaped;
-					for (char c : contains_val) {
-						if (c == '.' || c == '(' || c == ')' || c == '[' || c == ']' ||
-						    c == '{' || c == '}' || c == '+' || c == '?' || c == '^' ||
-						    c == '$' || c == '|' || c == '\\' || c == '*') {
-							escaped += '\\';
-						}
-						escaped += c;
-					}
-					string filter_str = "urlkey:.*" + escaped + ".*";
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey contains: %s\n", ElapsedMs(), filter_str.c_str());
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
+					string escaped = EscapeRegex(constant.value.ToString());
+					TryAddCdxRegexFilter(bind_data, col_name, ".*" + escaped + ".*", "contains");
 					filters_to_remove.push_back(i);
 					continue;
 				}
 			}
 
-			// Handle regexp_matches for urlkey: urlkey ~ 'regex'
+			// Handle regexp_matches: column ~ 'regex'
 			if ((func.function.name == "regexp_matches" || func.function.name == "~") &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -644,19 +684,18 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string regex_pattern = constant.value.ToString();
-					string filter_str = "urlkey:" + regex_pattern;
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey regex: %s\n", ElapsedMs(), filter_str.c_str());
+					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "regex");
 					filters_to_remove.push_back(i);
 					continue;
 				}
 			}
 
-			// Handle regexp_full_match for urlkey: SIMILAR TO converts to this
-			// SIMILAR TO uses SQL regex: % = .*, _ = ., and it's a full match (anchored)
+			// Handle regexp_full_match: SIMILAR TO converts to this
 			if (func.function.name == "regexp_full_match" &&
 			    func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
@@ -664,24 +703,13 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+				string col_name = col_ref.GetName();
 
-				if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					// Convert SQL regex (%, _) to standard regex (already a full match)
+				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
+				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
 					string sql_regex = constant.value.ToString();
-					string regex_pattern = "^";
-					for (char c : sql_regex) {
-						if (c == '%') {
-							regex_pattern += ".*";
-						} else if (c == '_') {
-							regex_pattern += ".";
-						} else {
-							regex_pattern += c;
-						}
-					}
-					regex_pattern += "$";
-					string filter_str = "urlkey:" + regex_pattern;
-					bind_data.cdx_filters.push_back(filter_str);
-					fprintf(stderr, "[DEBUG +%.0fms] urlkey SIMILAR TO: %s -> %s\n", ElapsedMs(), sql_regex.c_str(), filter_str.c_str());
+					string regex_pattern = SqlRegexToJavaRegex(sql_regex);
+					TryAddCdxRegexFilter(bind_data, col_name, regex_pattern, "SIMILAR TO");
 					filters_to_remove.push_back(i);
 					continue;
 				}
@@ -882,8 +910,8 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				filters_to_remove.push_back(i);
 			}
 		}
-		// Handle status_code filtering
-		if (column_name == "status_code" &&
+		// Handle statuscode filtering
+		if (column_name == "statuscode" &&
 		    (constant.value.type().id() == LogicalTypeId::INTEGER ||
 		     constant.value.type().id() == LogicalTypeId::BIGINT)) {
 			if (filter->type == ExpressionType::COMPARE_EQUAL) {
@@ -896,8 +924,8 @@ static void InternetArchivePushdownComplexFilter(ClientContext &context, Logical
 				filters_to_remove.push_back(i);
 			}
 		}
-		// Handle mime_type filtering
-		else if (column_name == "mime_type" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
+		// Handle mimetype filtering
+		else if (column_name == "mimetype" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
 			if (filter->type == ExpressionType::COMPARE_EQUAL) {
 				string filter_str = "mimetype:" + constant.value.ToString();
 				bind_data.cdx_filters.push_back(filter_str);
@@ -979,7 +1007,7 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const InternetArchiveBindDat
 		}
 
 		// Also check by column binding - timestamp is column index 1 in our schema
-		// (url=0, timestamp=1, urlkey=2, mime_type=3, status_code=4, digest=5, length=6, response=7, cdx_url=8)
+		// (url=0, timestamp=1, urlkey=2, mimetype=3, statuscode=4, digest=5, length=6, response=7, cdx_url=8)
 		if (col_ref.binding.column_index == 1) {
 			fprintf(stderr, "[DEBUG] TOP_N matched timestamp by column index\n");
 			return true;
@@ -996,8 +1024,9 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		auto &top_n = op->Cast<LogicalTopN>();
 		reference<LogicalOperator> child = *op->children[0];
 
-		// Skip projection operators to find GET
-		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		// Skip projection and filter operators to find GET
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION ||
+		       child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
 			child = *child.get().children[0];
 		}
 
@@ -1052,8 +1081,9 @@ void OptimizeInternetArchiveLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		auto &limit = op->Cast<LogicalLimit>();
 		reference<LogicalOperator> child = *op->children[0];
 
-		// Skip projection operators to find GET
-		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		// Skip projection and filter operators to find GET
+		while (child.get().type == LogicalOperatorType::LOGICAL_PROJECTION ||
+		       child.get().type == LogicalOperatorType::LOGICAL_FILTER) {
 			child = *child.get().children[0];
 		}
 

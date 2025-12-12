@@ -55,29 +55,29 @@ true
 # STATUS_CODE FILTER PUSHDOWN TESTS
 # ============================================
 
-# Test status_code = 200 pushdown
+# Test statuscode = 200 pushdown
 query I
 SELECT cdx_url LIKE '%filter=statuscode:200%' FROM internet_archive()
 WHERE url = 'example.com'
-  AND status_code = 200
+  AND statuscode = 200
 LIMIT 1;
 ----
 true
 
-# Test status_code = 404 pushdown
+# Test statuscode = 404 pushdown
 query I
 SELECT cdx_url LIKE '%filter=statuscode:404%' FROM internet_archive()
 WHERE url = 'example.com'
-  AND status_code = 404
+  AND statuscode = 404
 LIMIT 1;
 ----
 true
 
-# Test status_code != pushdown (negative filter)
+# Test statuscode != pushdown (negative filter)
 query I
 SELECT cdx_url LIKE '%filter=!statuscode:404%' FROM internet_archive()
 WHERE url = 'example.com'
-  AND status_code != 404
+  AND statuscode != 404
 LIMIT 1;
 ----
 true
@@ -86,20 +86,20 @@ true
 # MIME_TYPE FILTER PUSHDOWN TESTS
 # ============================================
 
-# Test mime_type = 'text/html' pushdown
+# Test mimetype = 'text/html' pushdown
 query I
 SELECT cdx_url LIKE '%filter=mimetype:text/html%' FROM internet_archive()
 WHERE url = 'example.com'
-  AND mime_type = 'text/html'
+  AND mimetype = 'text/html'
 LIMIT 1;
 ----
 true
 
-# Test mime_type != pushdown (negative filter)
+# Test mimetype != pushdown (negative filter)
 query I
 SELECT cdx_url LIKE '%filter=!mimetype:application/pdf%' FROM internet_archive()
 WHERE url = 'example.com'
-  AND mime_type != 'application/pdf'
+  AND mimetype != 'application/pdf'
 LIMIT 1;
 ----
 true
@@ -207,13 +207,13 @@ SELECT
     AND cdx_url LIKE '%&limit=5%'
 FROM internet_archive()
 WHERE url = 'example.com/*'
-  AND status_code = 200
-  AND mime_type = 'text/html'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
 LIMIT 5;
 ----
 true
 
-# Test timestamp + status_code + mime_type
+# Test timestamp + statuscode + mimetype
 query I
 SELECT
     cdx_url LIKE '%&from=2024%'
@@ -222,8 +222,8 @@ SELECT
 FROM internet_archive()
 WHERE url = 'example.com/*'
   AND timestamp > '2024-01-01'
-  AND status_code = 200
-  AND mime_type = 'text/html'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
 LIMIT 1;
 ----
 true
@@ -268,8 +268,8 @@ FROM internet_archive(collapse := 'urlkey')
 WHERE url = 'example.com/*'
   AND timestamp > '2024-01-01'
   AND timestamp < '2025-01-01'
-  AND status_code = 200
-  AND mime_type = 'text/html'
+  AND statuscode = 200
+  AND mimetype = 'text/html'
   AND NOT urlkey LIKE '%?%'
 LIMIT 10;
 ----

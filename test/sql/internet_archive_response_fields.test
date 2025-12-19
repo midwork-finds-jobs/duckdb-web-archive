@@ -1,0 +1,109 @@
+# name: test/sql/internet_archive_response_fields.test
+# description: Test that response column selection works correctly with DISTINCT ON
+# group: [sql]
+
+# Bug fix: When response is selected, the extension must add timestamp and original
+# to fields_needed so they're included in the CDX API request (&fl= parameter).
+# These are required to construct the download URL:
+#   https://web.archive.org/web/{timestamp}id_/{original}
+# Without these fields, FetchArchivedPage returns "Missing timestamp or URL" error.
+#
+# Note: These are planner-level tests (LIMIT 0). A full regression test would need
+# network access since the error occurs at fetch time. The debug := true / cdx_url
+# approach can't be used here because projecting 'response' disables cdx_url_only mode.
+
+require web_archive
+
+# ============================================
+# BASIC RESPONSE SELECTION (SYNTAX TESTS)
+# ============================================
+
+# Test: Selecting response.body works
+statement ok
+SELECT url, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: Selecting response struct works
+statement ok
+SELECT url, response
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: Selecting response.error works
+statement ok
+SELECT url, response.error
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# ============================================
+# DISTINCT ON + RESPONSE (BUG FIX TESTS)
+# These were the failing cases before the fix
+# ============================================
+
+# Test: DISTINCT ON(year) with response.body works
+statement ok
+SELECT DISTINCT ON(year) url, timestamp, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: DISTINCT ON(digest) with response.body works
+statement ok
+SELECT DISTINCT ON(digest) url, timestamp, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: DISTINCT ON(year, month) with response.body works
+statement ok
+SELECT DISTINCT ON(year, month) url, timestamp, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: DISTINCT ON with only response.body (no explicit timestamp)
+# This should still work because response selection adds timestamp to fields_needed
+statement ok
+SELECT DISTINCT ON(year) response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: DISTINCT ON with only response.body and url (no explicit timestamp)
+statement ok
+SELECT DISTINCT ON(year) url, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# ============================================
+# COMBINED PROJECTIONS
+# ============================================
+
+# Test: All common columns with response
+statement ok
+SELECT url, urlkey, timestamp, year, month, statuscode, mimetype, digest, length, response
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;
+
+# Test: DISTINCT ON with all columns
+statement ok
+SELECT DISTINCT ON(year) url, urlkey, timestamp, statuscode, mimetype, digest, length, response.body
+FROM wayback_machine()
+WHERE url = 'example.com'
+  AND statuscode = 200
+LIMIT 0;

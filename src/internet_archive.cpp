@@ -494,6 +494,16 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 				bind_data.fields_needed.push_back("length");
 			} else if (col_name == "response") {
 				bind_data.fetch_response = true;
+				// Response fetching requires timestamp and original to construct download URL:
+				// https://web.archive.org/web/{timestamp}id_/{original}
+				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "timestamp") ==
+				    bind_data.fields_needed.end()) {
+					bind_data.fields_needed.push_back("timestamp");
+				}
+				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "original") ==
+				    bind_data.fields_needed.end()) {
+					bind_data.fields_needed.push_back("original");
+				}
 				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
 			} else if (col_name == "year" || col_name == "month") {
 				// year and month need timestamp field

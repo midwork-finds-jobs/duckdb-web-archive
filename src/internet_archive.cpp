@@ -482,8 +482,13 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 	state->column_ids = input.column_ids;
 
 	// Rebuild fields_needed based on projection pushdown
-	// Map column names to CDX API field names
+	// Two-phase approach: detect what's needed, then add dependencies
 	bind_data.fields_needed.clear();
+
+	// Phase 1: Detect what columns are needed and map direct fields
+	bool need_response = false;
+	bool need_year_or_month = false;
+
 	for (auto &col_id : input.column_ids) {
 		if (col_id < bind_data.column_names.size()) {
 			string col_name = bind_data.column_names[col_id];
@@ -504,19 +509,27 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 			} else if (col_name == "length") {
 				bind_data.fields_needed.push_back("length");
 			} else if (col_name == "response") {
-				bind_data.fetch_response = true;
-				// Response fetching requires timestamp and original to construct download URL:
-				// https://web.archive.org/web/{timestamp}id_/{original}
-				EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
-				EnsureFieldNeeded(bind_data.fields_needed, "original");
-				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
+				need_response = true;
 			} else if (col_name == "year" || col_name == "month") {
-				// year and month need timestamp field
-				EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
-			} else if (col_name == "cdx_url") {
-				// cdx_url doesn't need any CDX fields
+				need_year_or_month = true;
 			}
+			// cdx_url doesn't need any CDX fields
 		}
+	}
+
+	// Phase 2: Add dependencies based on detected needs
+	if (need_response) {
+		bind_data.fetch_response = true;
+		// Response fetching requires timestamp and original to construct download URL:
+		// https://web.archive.org/web/{timestamp}id_/{original}
+		EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
+		EnsureFieldNeeded(bind_data.fields_needed, "original");
+		DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
+	}
+
+	if (need_year_or_month) {
+		// year and month columns need timestamp field
+		EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
 	}
 
 	// Check if only cdx_url is selected (debug mode, fields_needed is empty and no response)

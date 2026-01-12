@@ -23,6 +23,17 @@
 namespace duckdb {
 
 // ========================================
+// HELPERS
+// ========================================
+
+// Add a field to fields_needed if not already present
+static void EnsureFieldNeeded(vector<string> &fields_needed, const string &field) {
+	if (std::find(fields_needed.begin(), fields_needed.end(), field) == fields_needed.end()) {
+		fields_needed.push_back(field);
+	}
+}
+
+// ========================================
 // BIND DATA AND STATE
 // ========================================
 
@@ -496,21 +507,12 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 				bind_data.fetch_response = true;
 				// Response fetching requires timestamp and original to construct download URL:
 				// https://web.archive.org/web/{timestamp}id_/{original}
-				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "timestamp") ==
-				    bind_data.fields_needed.end()) {
-					bind_data.fields_needed.push_back("timestamp");
-				}
-				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "original") ==
-				    bind_data.fields_needed.end()) {
-					bind_data.fields_needed.push_back("original");
-				}
+				EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
+				EnsureFieldNeeded(bind_data.fields_needed, "original");
 				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
 			} else if (col_name == "year" || col_name == "month") {
 				// year and month need timestamp field
-				if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), "timestamp") ==
-				    bind_data.fields_needed.end()) {
-					bind_data.fields_needed.push_back("timestamp");
-				}
+				EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
 			} else if (col_name == "cdx_url") {
 				// cdx_url doesn't need any CDX fields
 			}

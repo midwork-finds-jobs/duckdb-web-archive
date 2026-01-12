@@ -34,6 +34,30 @@ static void EnsureFieldNeeded(vector<string> &fields_needed, const string &field
 }
 
 // ========================================
+// COLUMN DEPENDENCY MAPS
+// ========================================
+
+// Maps output column names to CDX API field names
+// Columns not in this map don't require CDX fields (e.g., cdx_url, response)
+static const std::unordered_map<string, string> COLUMN_TO_CDX_FIELD = {
+    {"url", "original"},      // CDX uses 'original' for the URL
+    {"timestamp", "timestamp"},
+    {"urlkey", "urlkey"},
+    {"mimetype", "mimetype"},
+    {"statuscode", "statuscode"},
+    {"digest", "digest"},
+    {"length", "length"},
+};
+
+// Maps columns that have dependencies on other CDX fields
+// These dependencies are added automatically when the column is selected
+static const std::unordered_map<string, vector<string>> COLUMN_DEPENDENCIES = {
+    {"response", {"timestamp", "original"}},  // Need these for download URL: /web/{timestamp}id_/{original}
+    {"year", {"timestamp"}},                   // Extracted from timestamp
+    {"month", {"timestamp"}},                  // Extracted from timestamp
+};
+
+// ========================================
 // BIND DATA AND STATE
 // ========================================
 
@@ -481,55 +505,43 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 	// Store projected columns
 	state->column_ids = input.column_ids;
 
-	// Rebuild fields_needed based on projection pushdown
-	// Two-phase approach: detect what's needed, then add dependencies
+	// Rebuild fields_needed based on projection pushdown using declarative maps
 	bind_data.fields_needed.clear();
+	vector<string> columns_with_dependencies;
 
-	// Phase 1: Detect what columns are needed and map direct fields
-	bool need_response = false;
-	bool need_year_or_month = false;
-
+	// Phase 1: Map columns to CDX fields and collect columns with dependencies
 	for (auto &col_id : input.column_ids) {
 		if (col_id < bind_data.column_names.size()) {
 			string col_name = bind_data.column_names[col_id];
 			DUCKDB_LOG_DEBUG(context, "Projected column: %s", col_name.c_str());
 
-			if (col_name == "url") {
-				bind_data.fields_needed.push_back("original");
-			} else if (col_name == "timestamp") {
-				bind_data.fields_needed.push_back("timestamp");
-			} else if (col_name == "urlkey") {
-				bind_data.fields_needed.push_back("urlkey");
-			} else if (col_name == "mimetype") {
-				bind_data.fields_needed.push_back("mimetype");
-			} else if (col_name == "statuscode") {
-				bind_data.fields_needed.push_back("statuscode");
-			} else if (col_name == "digest") {
-				bind_data.fields_needed.push_back("digest");
-			} else if (col_name == "length") {
-				bind_data.fields_needed.push_back("length");
-			} else if (col_name == "response") {
-				need_response = true;
-			} else if (col_name == "year" || col_name == "month") {
-				need_year_or_month = true;
+			// Check if column maps directly to a CDX field
+			auto field_it = COLUMN_TO_CDX_FIELD.find(col_name);
+			if (field_it != COLUMN_TO_CDX_FIELD.end()) {
+				bind_data.fields_needed.push_back(field_it->second);
 			}
-			// cdx_url doesn't need any CDX fields
+
+			// Check if column has dependencies
+			if (COLUMN_DEPENDENCIES.find(col_name) != COLUMN_DEPENDENCIES.end()) {
+				columns_with_dependencies.push_back(col_name);
+			}
+
+			// Special handling for response column
+			if (col_name == "response") {
+				bind_data.fetch_response = true;
+				DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
+			}
 		}
 	}
 
-	// Phase 2: Add dependencies based on detected needs
-	if (need_response) {
-		bind_data.fetch_response = true;
-		// Response fetching requires timestamp and original to construct download URL:
-		// https://web.archive.org/web/{timestamp}id_/{original}
-		EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
-		EnsureFieldNeeded(bind_data.fields_needed, "original");
-		DUCKDB_LOG_DEBUG(context, "Will fetch response bodies");
-	}
-
-	if (need_year_or_month) {
-		// year and month columns need timestamp field
-		EnsureFieldNeeded(bind_data.fields_needed, "timestamp");
+	// Phase 2: Add dependencies from the declarative map
+	for (const auto &col_name : columns_with_dependencies) {
+		auto dep_it = COLUMN_DEPENDENCIES.find(col_name);
+		if (dep_it != COLUMN_DEPENDENCIES.end()) {
+			for (const auto &dep_field : dep_it->second) {
+				EnsureFieldNeeded(bind_data.fields_needed, dep_field);
+			}
+		}
 	}
 
 	// Check if only cdx_url is selected (debug mode, fields_needed is empty and no response)

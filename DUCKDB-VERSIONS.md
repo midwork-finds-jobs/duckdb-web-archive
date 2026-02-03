@@ -103,6 +103,53 @@ When DuckDB releases a new major version (e.g., 1.6):
    git push origin v1.6
    ```
 
+## Community Extensions Integration
+
+The [DuckDB community-extensions](https://github.com/duckdb/community-extensions) repository builds extensions for the current stable DuckDB release. The `description.yml` file controls which commit to build.
+
+### Ref Strategy: Commit SHA vs Tags
+
+**Old approach (tags):**
+
+```yaml
+repo:
+  github: midwork-finds-jobs/duckdb-web-archive
+  ref: v0.2.1  # Tag - single point, can't track branch updates
+```
+
+**New approach (commit SHA):**
+
+```yaml
+repo:
+  github: midwork-finds-jobs/duckdb-web-archive
+  ref: 90c67cb283d668aec7154b8abd3e3001669696b7  # v1.4 branch HEAD
+```
+
+Using commit SHAs allows pointing to the appropriate version branch (v1.4, v1.5) without creating new tags.
+
+### Version Format
+
+Use date-based versions instead of semver to indicate freshness:
+
+```yaml
+extension:
+  version: '2026020301'  # YYYYMMDD + sequence number
+```
+
+### Updating Community Extensions
+
+When updating the community extension:
+
+1. Get the latest commit SHA from the appropriate branch:
+
+   ```bash
+   git rev-parse v1.4
+   ```
+
+2. Update `description.yml` in community-extensions with new ref and version
+
+3. Submit PR to duckdb/community-extensions
+
 ## Reference
 
 This strategy is based on the [tera extension](https://github.com/tera-insights/duckdb-tera) approach, which successfully maintains compatibility across DuckDB versions.

@@ -136,6 +136,17 @@ extension:
   version: '2026020301'  # YYYYMMDD + sequence number
 ```
 
+### Excluded Platforms
+
+Some platforms are excluded due to toolchain issues unrelated to extension code:
+
+```yaml
+extension:
+  excluded_platforms: windows_amd64_mingw
+```
+
+**windows_amd64_mingw** - Excluded due to vcpkg openssl build failures on mingw. The main Windows build (windows_amd64) works fine.
+
 ### Updating Community Extensions
 
 When updating the community extension:

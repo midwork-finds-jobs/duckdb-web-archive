@@ -176,7 +176,4 @@ void RegisterCommonCrawlFunction(ExtensionLoader &loader);
 // Wayback Machine (Internet Archive) table function
 void RegisterWaybackMachineFunction(ExtensionLoader &loader);
 
-// Optimizer for LIMIT pushdown
-void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
-
 } // namespace duckdb

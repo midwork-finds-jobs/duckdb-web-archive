@@ -45,6 +45,8 @@ uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ma
 with:
   duckdb_version: main
   ci_tools_version: main
+  extension_name: web_archive
+  exclude_archs: windows_amd64_mingw
 ```
 
 **v1.4 branch:**
@@ -54,6 +56,8 @@ uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ma
 with:
   duckdb_version: v1.4-andium
   ci_tools_version: main
+  extension_name: web_archive
+  exclude_archs: windows_amd64_mingw
 ```
 
 **v1.5 branch:**
@@ -63,7 +67,13 @@ uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ma
 with:
   duckdb_version: v1.5-variegata
   ci_tools_version: main
+  extension_name: web_archive
+  exclude_archs: windows_amd64_mingw
 ```
+
+### Excluded Architectures
+
+**windows_amd64_mingw** is excluded from CI due to vcpkg openssl build failures. The main Windows build (windows_amd64) works fine.
 
 ## Scheduled Builds
 

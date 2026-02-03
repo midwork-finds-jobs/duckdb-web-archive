@@ -4,9 +4,17 @@
 #include "web_archive_utils.hpp"
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
 
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
+
+// Feature detection: DuckDB 1.5+ has ExtensionCallbackManager, 1.4.x doesn't
+#if __has_include("duckdb/main/extension_callback_manager.hpp")
+#define DUCKDB_HAS_NEW_OPTIMIZER_API 1
+#else
+#define DUCKDB_HAS_NEW_OPTIMIZER_API 0
+#endif
 
 namespace duckdb {
 
@@ -16,11 +24,21 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op);
 void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op);
 
 // Combined optimizer for both table functions
-void CommonCrawlOptimizer(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+static void WebArchiveOptimizerFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	OptimizeCommonCrawlLimitPushdown(plan);
 	OptimizeWaybackMachineLimitPushdown(plan);
 	OptimizeWaybackMachineDistinctOnPushdown(plan);
 }
+
+#if DUCKDB_HAS_NEW_OPTIMIZER_API
+// DuckDB 1.5+ uses class-based OptimizerExtension::Register API
+class WebArchiveOptimizerExtension : public OptimizerExtension {
+public:
+	WebArchiveOptimizerExtension() {
+		optimize_function = WebArchiveOptimizerFunction;
+	}
+};
+#endif
 
 static void LoadInternal(ExtensionLoader &loader) {
 	// Note: httpfs extension must be loaded before using this extension
@@ -35,9 +53,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register optimizer extension for LIMIT pushdown
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+#if DUCKDB_HAS_NEW_OPTIMIZER_API
+	// DuckDB 1.5+ API
+	OptimizerExtension::Register(config, WebArchiveOptimizerExtension());
+#else
+	// DuckDB 1.4.x API
 	OptimizerExtension optimizer;
-	optimizer.optimize_function = CommonCrawlOptimizer;
+	optimizer.optimize_function = WebArchiveOptimizerFunction;
 	config.optimizer_extensions.push_back(std::move(optimizer));
+#endif
 }
 
 void WebArchiveExtension::Load(ExtensionLoader &loader) {

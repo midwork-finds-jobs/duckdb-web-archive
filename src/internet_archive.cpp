@@ -324,7 +324,11 @@ static FetchResult FetchArchivedPage(ClientContext &context, const ArchiveOrgRec
 				response_data.append(buffer.get(), bytes_read);
 			}
 
-			result.body = response_data;
+			// The web.archive.org id_/ endpoint returns the original bytes,
+			// which preserve the upstream Content-Encoding (LinkedIn and many
+			// others serve gzip). Transparently decompress so response.body is
+			// always usable HTML without a separate gunzip step.
+			result.body = DecompressIfCompressed(response_data);
 			return result; // Success - error is empty
 
 		} catch (Exception &ex) {

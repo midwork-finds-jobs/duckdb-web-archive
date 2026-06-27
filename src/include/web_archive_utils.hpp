@@ -62,6 +62,11 @@ timestamp_t ParseCDXTimestamp(const string &cdx_timestamp);
 // Helper function to decompress gzip data using zlib
 string DecompressGzip(const char *compressed_data, size_t compressed_size);
 
+// Transparently decompress a response body if it is gzip- or zlib-compressed
+// (detected via magic bytes). Returns the input unchanged when it is not
+// compressed or when decompression fails, so callers always get usable bytes.
+string DecompressIfCompressed(const string &data);
+
 // ========================================
 // HTTP/WARC PARSING
 // ========================================

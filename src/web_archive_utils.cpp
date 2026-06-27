@@ -267,6 +267,55 @@ string DecompressGzip(const char *compressed_data, size_t compressed_size) {
 	return string(decompressed_buffer.begin(), decompressed_buffer.end());
 }
 
+string DecompressIfCompressed(const string &data) {
+	// Need at least the 2-byte magic to classify.
+	if (data.size() < 2) {
+		return data;
+	}
+	auto b0 = static_cast<unsigned char>(data[0]);
+	auto b1 = static_cast<unsigned char>(data[1]);
+
+	// gzip starts with 1F 8B; zlib streams start with 78 {01,9C,DA}. Plain
+	// HTML/text never starts with these byte pairs, so this is unambiguous.
+	bool is_gzip = (b0 == 0x1f && b1 == 0x8b);
+	bool is_zlib = (b0 == 0x78 && (b1 == 0x01 || b1 == 0x9c || b1 == 0xda));
+	if (!is_gzip && !is_zlib) {
+		return data;
+	}
+
+	z_stream stream;
+	memset(&stream, 0, sizeof(stream));
+
+	// windowBits = 15 + 32 enables automatic gzip/zlib header detection.
+	if (inflateInit2(&stream, 15 + 32) != Z_OK) {
+		return data;
+	}
+
+	stream.avail_in = static_cast<uInt>(data.size());
+	stream.next_in = (Bytef *)data.data();
+
+	std::vector<char> out;
+	out.reserve(data.size() * 4);
+
+	const size_t chunk_size = 32768;
+	char out_buffer[chunk_size];
+	int ret;
+	do {
+		stream.avail_out = chunk_size;
+		stream.next_out = (Bytef *)out_buffer;
+		ret = inflate(&stream, Z_NO_FLUSH);
+		if (ret != Z_OK && ret != Z_STREAM_END) {
+			// Corrupt/partial stream or false-positive magic: keep raw bytes.
+			inflateEnd(&stream);
+			return data;
+		}
+		out.insert(out.end(), out_buffer, out_buffer + (chunk_size - stream.avail_out));
+	} while (ret != Z_STREAM_END);
+
+	inflateEnd(&stream);
+	return string(out.begin(), out.end());
+}
+
 // ========================================
 // HTTP/WARC PARSING
 // ========================================

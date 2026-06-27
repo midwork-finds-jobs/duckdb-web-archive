@@ -507,6 +507,19 @@ static unique_ptr<GlobalTableFunctionState> WaybackMachineInitGlobal(ClientConte
 		}
 	}
 
+	// Fetching response bodies builds the download URL from the archived
+	// page's timestamp + original URL, so both must be requested from the CDX
+	// API even when the user didn't project the url/timestamp columns.
+	// Without this the fetch fails with "Missing timestamp or URL".
+	if (bind_data.fetch_response) {
+		for (const char *required : {"original", "timestamp"}) {
+			if (std::find(bind_data.fields_needed.begin(), bind_data.fields_needed.end(), required) ==
+			    bind_data.fields_needed.end()) {
+				bind_data.fields_needed.push_back(required);
+			}
+		}
+	}
+
 	// Check if only cdx_url is selected (debug mode, fields_needed is empty and no response)
 	bind_data.cdx_url_only = bind_data.debug && bind_data.fields_needed.empty() && !bind_data.fetch_response;
 
@@ -828,7 +841,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if ((func.function.name == "like" || func.function.name == "~~") && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 
@@ -862,7 +874,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if ((func.function.name == "!~~" || func.function.name == "not_like") && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -896,7 +907,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if (func.function.name == "suffix" && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -926,7 +936,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if (func.function.name == "prefix" && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -953,7 +962,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if (func.function.name == "contains" && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -971,7 +979,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if ((func.function.name == "regexp_matches" || func.function.name == "~") && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -989,7 +996,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			if (func.function.name == "regexp_full_match" && func.children.size() >= 2 &&
 			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
 				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
 				string col_name = col_ref.GetName();
@@ -1010,7 +1016,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		    filter->type == ExpressionType::OPERATOR_NOT) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
 			if (op.children.size() >= 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-
 				auto &inner_func = op.children[0]->Cast<BoundFunctionExpression>();
 
 				// NOT regexp_matches(urlkey, 'regex')
@@ -1018,7 +1023,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				    inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 
@@ -1038,7 +1042,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				    inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 					string col_name = col_ref.GetName();
@@ -1071,7 +1074,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				if (inner_func.function.name == "suffix" && inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 
@@ -1089,7 +1091,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				if (inner_func.function.name == "prefix" && inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 
@@ -1107,7 +1108,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				if (inner_func.function.name == "regexp_full_match" && inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 
@@ -1127,7 +1127,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				if (inner_func.function.name == "contains" && inner_func.children.size() >= 2 &&
 				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-
 					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
 					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
 					string col_name = col_ref.GetName();
@@ -1164,7 +1163,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			auto &op = filter->Cast<BoundOperatorExpression>();
 			// First child is the column, rest are the values
 			if (op.children.size() >= 2 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-
 				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
 				string col_name = col_ref.GetName();
 
@@ -1254,7 +1252,6 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		                                        constant.value.type().id() == LogicalTypeId::TIMESTAMP_TZ ||
 		                                        constant.value.type().id() == LogicalTypeId::DATE ||
 		                                        constant.value.type().id() == LogicalTypeId::VARCHAR)) {
-
 			string cdx_timestamp = ToCdxTimestamp(constant.value.ToString());
 
 			if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||

@@ -12,6 +12,7 @@ test/python/__pycache__/
 .devenv*
 devenv.local.nix
 devenv.local.yaml
+.cache/
 
 # direnv
 .direnv

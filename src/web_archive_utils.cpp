@@ -1,6 +1,7 @@
 #include "web_archive_utils.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/extension_helper.hpp"
 #include "duckdb/logging/logger.hpp"
 
 namespace duckdb {
@@ -511,6 +512,16 @@ static string ExtractJSONStringField(const string &json, const string &field) {
 	return json.substr(start, end - start);
 }
 
+void EnableForceDownload(ClientContext &context) {
+	auto &db = DatabaseInstance::GetDatabase(context);
+	// Load httpfs first so the option is registered and takes effect for this request
+	// (otherwise SetOptionByName only parks it as an unrecognized option).
+	if (!db.ExtensionIsLoaded("httpfs")) {
+		ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
+	}
+	db.config.SetOptionByName("force_download", Value(true));
+}
+
 // Fetch and cache all crawl infos from collinfo.json
 static void FetchCollInfo(ClientContext &context) {
 	DUCKDB_LOG_DEBUG(context, "Fetching collinfo.json +%.0fms", ElapsedMs());
@@ -518,7 +529,7 @@ static void FetchCollInfo(ClientContext &context) {
 	string collinfo_url = "https://index.commoncrawl.org/collinfo.json";
 
 	// Set force_download globally to skip HEAD request for this fetch
-	context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+	EnableForceDownload(context);
 
 	// Use FileSystem to fetch directly
 	auto &fs = FileSystem::GetFileSystem(context);

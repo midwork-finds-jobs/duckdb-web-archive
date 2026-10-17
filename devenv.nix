@@ -38,7 +38,7 @@
 
   git-hooks.hooks = {
     # Nix files
-    nixfmt-rfc-style.enable = true;
+    nixfmt.enable = true;
     # Github Actions
     actionlint.enable = true;
     # Markdown files

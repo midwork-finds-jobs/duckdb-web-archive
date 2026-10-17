@@ -178,7 +178,7 @@ static vector<ArchiveOrgRecord> QueryArchiveOrgCDX(ClientContext &context, const
 
 	try {
 		// Set force_download to skip HEAD request
-		context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+		EnableForceDownload(context);
 
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto file_handle = fs.OpenFile(cdx_url, FileFlags::FILE_FLAGS_READ);
@@ -306,7 +306,7 @@ static FetchResult FetchArchivedPage(ClientContext &context, const ArchiveOrgRec
 			}
 
 			// Set force_download to skip HEAD request
-			context.db->GetDatabase(context).config.SetOption("force_download", Value(true));
+			EnableForceDownload(context);
 
 			auto &fs = FileSystem::GetFileSystem(context);
 			auto file_handle = fs.OpenFile(download_url, FileFlags::FILE_FLAGS_READ);

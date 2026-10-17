@@ -21,6 +21,17 @@ jobs:
       extension_name: web_archive
       exclude_archs: windows_amd64_mingw
 
+  # The community-extensions build uses the latest stable DuckDB, so every push/PR also builds and
+  # tests against v1.5 (a 1.5-only API break once shipped unnoticed while only `main` ran here).
+  duckdb-1-5-build:
+    name: Build extension binaries (DuckDB 1.5)
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    with:
+      duckdb_version: v1.5-variegata
+      ci_tools_version: main
+      extension_name: web_archive
+      exclude_archs: windows_amd64_mingw
+
   code-quality-check:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main

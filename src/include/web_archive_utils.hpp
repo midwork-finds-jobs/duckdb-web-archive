@@ -163,6 +163,11 @@ struct CollInfoCache {
 extern CollInfoCache g_collinfo_cache;
 
 // Helper function to fetch the latest crawl_id from collinfo.json (with 1-day caching)
+// Skip the HEAD request before ranged GETs. `force_download` is an httpfs extension option, so it
+// must be set through SetOptionByName (DBConfig::SetOption only knows core options and throws
+// "Unrecognized option force_download" on DuckDB 1.5), after httpfs is loaded.
+void EnableForceDownload(ClientContext &context);
+
 string GetLatestCrawlId(ClientContext &context);
 
 // Helper function to get all crawl infos (with 1-day caching)

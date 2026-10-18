@@ -61,8 +61,9 @@ inline const vector<unique_ptr<Expression>> &WaChildren(const BoundConjunctionEx
 	return expr.GetChildren();
 }
 #else
+// Trailing return type: DuckDB <= 1.5 builds extensions as C++11.
 template <class EXPR>
-inline auto &WaChildren(EXPR &expr) {
+inline auto WaChildren(EXPR &expr) -> decltype((expr.children)) {
 	return expr.children;
 }
 #endif

@@ -80,6 +80,9 @@
   git-hooks.hooks = {
     clang-format = {
       enable = true;
+      # Same clang-format as the shell: the hook's default (clang-tools 23) re-wraps continuation
+      # lines differently from DuckDB's CI format check.
+      package = pkgs.clang-tools;
       types_or = [
         "c++"
         "c"

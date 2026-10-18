@@ -309,7 +309,7 @@ static WARCResponse FetchWARCResponse(ClientContext &context, const CDXRecord &r
 
 // Bind function for the table function
 static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, WaNames &names) {
 	DUCKDB_LOG_DEBUG(context, "CommonCrawlBind called +%.0fms", ElapsedMs());
 
 	// Optional max_results named parameter to control CDX API result size
@@ -318,6 +318,10 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 
 	// Handle named parameters
 	for (auto &kv : input.named_parameters) {
+		// DuckDB 2.0 passes declared-but-omitted keyword parameters as their (NULL) default.
+		if (kv.second.IsNull()) {
+			continue;
+		}
 		if (kv.first == "max_results") {
 			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
 				throw BinderException("common_crawl_index max_results parameter must be an integer");
@@ -407,7 +411,7 @@ static unique_ptr<FunctionData> CommonCrawlBind(ClientContext &context, TableFun
 	// Projection pushdown will control whether this is actually fetched
 	bind_data->fetch_response = true;
 
-	bind_data->column_names = names;
+	bind_data->column_names = WaStrings(names);
 	bind_data->column_types = return_types;
 
 	return std::move(bind_data);
@@ -625,34 +629,34 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 
 			try {
 				if (col_name == "url") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.url));
 				} else if (col_name == "timestamp") {
-					auto data_ptr = FlatVector::GetData<timestamp_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<timestamp_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = ParseCDXTimestamp(record.timestamp);
 				} else if (col_name == "mimetype") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));
 				} else if (col_name == "statuscode") {
-					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int32_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.status_code;
 				} else if (col_name == "digest") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.digest));
 				} else if (col_name == "filename") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.filename));
 				} else if (col_name == "offset") {
-					auto data_ptr = FlatVector::GetData<int64_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int64_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.offset;
 				} else if (col_name == "length") {
-					auto data_ptr = FlatVector::GetData<int64_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int64_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.length;
 				} else if (col_name == "crawl_id") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], record.crawl_id);
 				} else if (col_name == "warc" || col_name == "response") {
 					if (bind_data.fetch_response && !warc_responses.empty()) {
@@ -664,13 +668,13 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							auto &struct_children = StructVector::GetEntries(struct_vector);
 
 							// Child 0: version (VARCHAR)
-							auto &version_vector = struct_children[0];
-							auto version_data = FlatVector::GetData<string_t>(*version_vector);
+							auto version_vector = WaVec(struct_children[0]);
+							auto version_data = WaData<string_t>(*version_vector);
 							version_data[output_offset] =
 							    StringVector::AddString(*version_vector, SanitizeUTF8(warc_response.warc_version));
 
 							// Child 1: headers (MAP)
-							auto &headers_map = struct_children[1];
+							auto headers_map = WaVec(struct_children[1]);
 							auto &map_keys = MapVector::GetKeys(*headers_map);
 							auto &map_values = MapVector::GetValues(*headers_map);
 
@@ -678,8 +682,8 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							idx_t new_size = map_offset + warc_response.warc_headers.size();
 							ListVector::Reserve(*headers_map, new_size);
 
-							auto key_data = FlatVector::GetData<string_t>(map_keys);
-							auto value_data = FlatVector::GetData<string_t>(map_values);
+							auto key_data = WaData<string_t>(map_keys);
+							auto value_data = WaData<string_t>(map_values);
 
 							for (const auto &header : warc_response.warc_headers) {
 								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
@@ -688,7 +692,7 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 								map_offset++;
 							}
 
-							auto map_data = FlatVector::GetData<list_entry_t>(*headers_map);
+							auto map_data = WaData<list_entry_t>(*headers_map);
 							map_data[output_offset].offset = ListVector::GetListSize(*headers_map);
 							map_data[output_offset].length = warc_response.warc_headers.size();
 							ListVector::SetListSize(*headers_map, map_offset);
@@ -699,12 +703,12 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							auto &struct_children = StructVector::GetEntries(struct_vector);
 
 							// Child 0: body (BLOB)
-							auto &body_vector = struct_children[0];
-							auto body_data = FlatVector::GetData<string_t>(*body_vector);
+							auto body_vector = WaVec(struct_children[0]);
+							auto body_data = WaData<string_t>(*body_vector);
 							body_data[output_offset] = StringVector::AddStringOrBlob(*body_vector, warc_response.body);
 
 							// Child 1: headers (MAP)
-							auto &headers_map = struct_children[1];
+							auto headers_map = WaVec(struct_children[1]);
 							auto &map_keys = MapVector::GetKeys(*headers_map);
 							auto &map_values = MapVector::GetValues(*headers_map);
 
@@ -712,8 +716,8 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 							idx_t new_size = map_offset + warc_response.http_headers.size();
 							ListVector::Reserve(*headers_map, new_size);
 
-							auto key_data = FlatVector::GetData<string_t>(map_keys);
-							auto value_data = FlatVector::GetData<string_t>(map_values);
+							auto key_data = WaData<string_t>(map_keys);
+							auto value_data = WaData<string_t>(map_values);
 
 							for (const auto &header : warc_response.http_headers) {
 								key_data[map_offset] = StringVector::AddString(map_keys, header.first);
@@ -722,14 +726,14 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 								map_offset++;
 							}
 
-							auto map_data = FlatVector::GetData<list_entry_t>(*headers_map);
+							auto map_data = WaData<list_entry_t>(*headers_map);
 							map_data[output_offset].offset = ListVector::GetListSize(*headers_map);
 							map_data[output_offset].length = warc_response.http_headers.size();
 							ListVector::SetListSize(*headers_map, map_offset);
 
 							// Child 2: http_version (VARCHAR)
-							auto &version_vector = struct_children[2];
-							auto version_data = FlatVector::GetData<string_t>(*version_vector);
+							auto version_vector = WaVec(struct_children[2]);
+							auto version_data = WaData<string_t>(*version_vector);
 							version_data[output_offset] =
 							    StringVector::AddString(*version_vector, SanitizeUTF8(warc_response.http_version));
 						}
@@ -737,7 +741,7 @@ static void CommonCrawlScan(ClientContext &context, TableFunctionInput &data, Da
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
 				} else if (col_name == "cdx_url") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
 				}
 			} catch (const std::exception &ex) {
@@ -846,22 +850,22 @@ static bool TryHandleInExpression(ClientContext &context, CommonCrawlBindData &b
 
 	vector<string> values;
 	// children[0] is the column ref, children[1..n] are the values
-	for (size_t i = 1; i < op.children.size(); i++) {
-		if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+	for (size_t i = 1; i < WaChildren(op).size(); i++) {
+		if (WaChildren(op)[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 			return false; // Non-constant value, can't push down
 		}
-		auto &constant = op.children[i]->Cast<BoundConstantExpression>();
+		auto &constant = WaChildren(op)[i]->Cast<BoundConstantExpression>();
 		if (is_integer) {
-			if (constant.value.type().id() != LogicalTypeId::INTEGER &&
-			    constant.value.type().id() != LogicalTypeId::BIGINT) {
+			if (WaValue(constant).type().id() != LogicalTypeId::INTEGER &&
+			    WaValue(constant).type().id() != LogicalTypeId::BIGINT) {
 				return false;
 			}
-			values.push_back(to_string(constant.value.GetValue<int32_t>()));
+			values.push_back(to_string(WaValue(constant).GetValue<int32_t>()));
 		} else {
-			if (constant.value.type().id() != LogicalTypeId::VARCHAR) {
+			if (WaValue(constant).type().id() != LogicalTypeId::VARCHAR) {
 				return false;
 			}
-			values.push_back(constant.value.ToString());
+			values.push_back(WaValue(constant).ToString());
 		}
 	}
 
@@ -911,9 +915,10 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			auto &op = filter->Cast<BoundOperatorExpression>();
 
 			// Check if first child is a column and rest are constants
-			if (op.children.size() >= 2 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
-				string col_name = col_ref.GetName();
+			if (WaChildren(op).size() >= 2 &&
+			    WaChildren(op)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = WaChildren(op)[0]->Cast<BoundColumnRefExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				// Handle statuscode IN (200, 301, 302) -> ~status:(200|301|302)
 				if (col_name == "statuscode") {
@@ -935,11 +940,11 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 					bool all_constants = true;
 
 					// Extract all constant values (children[1] onwards)
-					for (size_t j = 1; j < op.children.size(); j++) {
-						if (op.children[j]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-							auto &constant = op.children[j]->Cast<BoundConstantExpression>();
-							if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
-								crawl_id_values.push_back(constant.value.ToString());
+					for (size_t j = 1; j < WaChildren(op).size(); j++) {
+						if (WaChildren(op)[j]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+							auto &constant = WaChildren(op)[j]->Cast<BoundConstantExpression>();
+							if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+								crawl_id_values.push_back(WaValue(constant).ToString());
 								continue;
 							}
 						}
@@ -957,30 +962,30 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 			// Alternative: Check if this is an IN operator (children[0] should be wrapped in CONJUNCTION due to
 			// optimization)
-			if (op.children.size() == 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
-				auto &conjunction = op.children[0]->Cast<BoundConjunctionExpression>();
+			if (WaChildren(op).size() == 1 &&
+			    WaChildren(op)[0]->GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION) {
+				auto &conjunction = WaChildren(op)[0]->Cast<BoundConjunctionExpression>();
 				DUCKDB_LOG_DEBUG(context, "Found CONJUNCTION inside OPERATOR, type=%d, children=%lu",
-				                 (int)conjunction.type, (unsigned long)conjunction.children.size());
+				                 (int)conjunction.GetExpressionType(), (unsigned long)WaChildren(conjunction).size());
 
 				// Only handle OR conjunctions (IN clauses become OR of equalities)
-				if (conjunction.type == ExpressionType::CONJUNCTION_OR) {
+				if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 					vector<string> crawl_id_values;
 					bool all_crawl_id_comparisons = true;
 
 					// Check if all children are crawl_id = 'value' comparisons
-					for (auto &child : conjunction.children) {
-						if (child->GetExpressionClass() == ExpressionClass::BOUND_COMPARISON &&
-						    child->type == ExpressionType::COMPARE_EQUAL) {
-							auto &comp = child->Cast<BoundComparisonExpression>();
+					for (auto &child : WaChildren(conjunction)) {
+						if (WaIsComparison(*child) && child->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
+							auto comp = WaAsComparison(*child);
 
 							if (comp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 							    comp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 								auto &col_ref = comp.left->Cast<BoundColumnRefExpression>();
 								auto &constant = comp.right->Cast<BoundConstantExpression>();
 
-								if (col_ref.GetName() == "crawl_id" &&
-								    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-									crawl_id_values.push_back(constant.value.ToString());
+								if (WaColumnName(col_ref) == "crawl_id" &&
+								    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+									crawl_id_values.push_back(WaValue(constant).ToString());
 									continue;
 								}
 							}
@@ -1008,22 +1013,21 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		// Handle BOUND_FUNCTION for LIKE expressions
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &func = filter->Cast<BoundFunctionExpression>();
-			DUCKDB_LOG_DEBUG(context, "Function name: %s, children: %lu", func.function.name.c_str(),
-			                 (unsigned long)func.children.size());
+			DUCKDB_LOG_DEBUG(context, "Function name: %s, children: %lu", WaFunctionName(func).c_str(),
+			                 (unsigned long)WaChildren(func).size());
 
 			// Check if this is a SUFFIX function (DuckDB optimizes LIKE '%string' to suffix)
-			if (func.function.name == "suffix") {
+			if (WaFunctionName(func) == "suffix") {
 				// SUFFIX has 2 children: column and suffix string
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string suffix_string = constant.value.ToString();
+					if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string suffix_string = WaValue(constant).ToString();
 						// Convert to CDX wildcard pattern: *suffix_string
 						bind_data.url_filter = "*" + suffix_string;
 						DUCKDB_LOG_DEBUG(context, "SUFFIX URL filter: '%s' -> '%s'", suffix_string.c_str(),
@@ -1034,18 +1038,17 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				}
 			}
 			// Check if this is a PREFIX function (DuckDB optimizes LIKE 'string%' to prefix)
-			else if (func.function.name == "prefix") {
+			else if (WaFunctionName(func) == "prefix") {
 				// PREFIX has 2 children: column and prefix string
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string prefix_string = constant.value.ToString();
+					if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string prefix_string = WaValue(constant).ToString();
 						if (column_name == "url") {
 							// Convert to CDX wildcard pattern: prefix_string*
 							bind_data.url_filter = prefix_string + "*";
@@ -1066,18 +1069,17 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				}
 			}
 			// Check if this is a CONTAINS function (DuckDB optimizes LIKE '%string%' to contains)
-			else if (func.function.name == "contains") {
+			else if (WaFunctionName(func) == "contains") {
 				// CONTAINS has 2 children: column and search string
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string search_string = constant.value.ToString();
+					if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string search_string = WaValue(constant).ToString();
 						// Convert to CDX wildcard pattern: *search_string*
 						bind_data.url_filter = "*" + search_string + "*";
 						DUCKDB_LOG_DEBUG(context, "CONTAINS URL filter: '%s' -> '%s'", search_string.c_str(),
@@ -1088,18 +1090,17 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				}
 			}
 			// Check if this is a LIKE function
-			else if (func.function.name == "like" || func.function.name == "~~") {
+			else if (WaFunctionName(func) == "like" || WaFunctionName(func) == "~~") {
 				// LIKE has 2 children: column and pattern
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string original_pattern = constant.value.ToString();
+					if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string original_pattern = WaValue(constant).ToString();
 
 						if (column_name == "url") {
 							// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
@@ -1122,17 +1123,16 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			}
 			// Check if this is a NOT LIKE function (!~~ or not_like)
 			// url NOT LIKE 'pattern' -> &filter=!url:regex
-			else if (func.function.name == "!~~" || func.function.name == "not_like") {
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			else if (WaFunctionName(func) == "!~~" || WaFunctionName(func) == "not_like") {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string like_pattern = constant.value.ToString();
+					if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string like_pattern = WaValue(constant).ToString();
 						string regex_pattern = SqlRegexToRegex(like_pattern);
 
 						if (column_name == "url") {
@@ -1157,17 +1157,16 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			}
 			// Check if this is a SIMILAR TO function (regexp_matches / regexp_full_match)
 			// Used for regex matching on url/statuscode/mimetype columns
-			else if (func.function.name == "regexp_matches" || func.function.name == "regexp_full_match") {
-				if (func.children.size() >= 2 &&
-				    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+			else if (WaFunctionName(func) == "regexp_matches" || WaFunctionName(func) == "regexp_full_match") {
+				if (WaChildren(func).size() >= 2 &&
+				    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string regex_pattern = constant.value.ToString();
+					if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string regex_pattern = WaValue(constant).ToString();
 
 						// Handle url SIMILAR TO -> ~url:regex
 						// DuckDB already converts SIMILAR TO to regex, so just add anchors
@@ -1200,23 +1199,22 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		// Handle OPERATOR_NOT wrapping functions like prefix(), suffix(), contains(), like()
 		// DuckDB sometimes wraps NOT LIKE as NOT(prefix()) or NOT(like())
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
-		    filter->type == ExpressionType::OPERATOR_NOT) {
+		    filter->GetExpressionType() == ExpressionType::OPERATOR_NOT) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
-			if (op.children.size() >= 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-
-				auto &inner_func = op.children[0]->Cast<BoundFunctionExpression>();
+			if (WaChildren(op).size() >= 1 &&
+			    WaChildren(op)[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+				auto &inner_func = WaChildren(op)[0]->Cast<BoundFunctionExpression>();
 
 				// NOT prefix(url, 'pattern') -> !~url:^pattern.*$ (negated regex match)
-				if (inner_func.function.name == "prefix" && inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if (WaFunctionName(inner_func) == "prefix" && WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string prefix_str = constant.value.ToString();
+					if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string prefix_str = WaValue(constant).ToString();
 						string regex_pattern = "^" + EscapeRegexSpecialChars(prefix_str) + ".*$";
 						string filter_str = "!~url:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
@@ -1227,17 +1225,16 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				}
 
 				// NOT like(url, 'pattern') or NOT ~~(url, 'pattern') -> !~url:regex (negated regex match)
-				if ((inner_func.function.name == "like" || inner_func.function.name == "~~") &&
-				    inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if ((WaFunctionName(inner_func) == "like" || WaFunctionName(inner_func) == "~~") &&
+				    WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string like_pattern = constant.value.ToString();
+					if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string like_pattern = WaValue(constant).ToString();
 						string regex_pattern = SqlRegexToRegex(like_pattern);
 						string filter_str = "!~url:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
@@ -1251,17 +1248,17 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 				// NOT regexp_matches(url, 'pattern') or NOT regexp_full_match(url, 'pattern') -> !~url:regex
 				// This handles NOT SIMILAR TO for the url column
 				// DuckDB already converts SIMILAR TO to regex, so just add anchors
-				if ((inner_func.function.name == "regexp_matches" || inner_func.function.name == "regexp_full_match") &&
-				    inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				if ((WaFunctionName(inner_func) == "regexp_matches" ||
+				     WaFunctionName(inner_func) == "regexp_full_match") &&
+				    WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
+					string column_name = WaColumnName(col_ref);
 
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
-					string column_name = col_ref.GetName();
-
-					if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string regex_pattern = constant.value.ToString();
+					if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string regex_pattern = WaValue(constant).ToString();
 						// Add anchors if not present
 						string anchored_regex = regex_pattern;
 						if (anchored_regex.empty() || anchored_regex[0] != '^') {
@@ -1283,23 +1280,23 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 
 		// Handle BOUND_BETWEEN for timestamp range (e.g., timestamp BETWEEN '2025-11-12' AND '2025-11-14')
 		// DuckDB also converts `timestamp >= X AND timestamp < Y` to BETWEEN
-		if (filter->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-			auto &between = filter->Cast<BoundBetweenExpression>();
+		if (WaIsBetween(*filter)) {
+			auto between = WaAsBetween(*filter);
 
 			// Check if input is a timestamp column reference
 			if (between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 				auto &col_ref = between.input->Cast<BoundColumnRefExpression>();
 
-				if (col_ref.GetName() == "timestamp") {
+				if (WaColumnName(col_ref) == "timestamp") {
 					// Extract lower bound
 					if (between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 						auto &lower_const = between.lower->Cast<BoundConstantExpression>();
 						timestamp_t lower_ts;
-						if (lower_const.value.type().id() == LogicalTypeId::TIMESTAMP ||
-						    lower_const.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
-							lower_ts = timestamp_t(lower_const.value.GetValue<int64_t>());
-						} else if (lower_const.value.type().id() == LogicalTypeId::VARCHAR) {
-							lower_ts = Timestamp::FromString(lower_const.value.ToString(), false);
+						if (WaValue(lower_const).type().id() == LogicalTypeId::TIMESTAMP ||
+						    WaValue(lower_const).type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+							lower_ts = timestamp_t(WaValue(lower_const).GetValue<int64_t>());
+						} else if (WaValue(lower_const).type().id() == LogicalTypeId::VARCHAR) {
+							lower_ts = Timestamp::FromString(WaValue(lower_const).ToString(), false);
 						} else {
 							lower_ts = timestamp_t(0);
 						}
@@ -1315,11 +1312,11 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 					if (between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 						auto &upper_const = between.upper->Cast<BoundConstantExpression>();
 						timestamp_t upper_ts;
-						if (upper_const.value.type().id() == LogicalTypeId::TIMESTAMP ||
-						    upper_const.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
-							upper_ts = timestamp_t(upper_const.value.GetValue<int64_t>());
-						} else if (upper_const.value.type().id() == LogicalTypeId::VARCHAR) {
-							upper_ts = Timestamp::FromString(upper_const.value.ToString(), false);
+						if (WaValue(upper_const).type().id() == LogicalTypeId::TIMESTAMP ||
+						    WaValue(upper_const).type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+							upper_ts = timestamp_t(WaValue(upper_const).GetValue<int64_t>());
+						} else if (WaValue(upper_const).type().id() == LogicalTypeId::VARCHAR) {
+							upper_ts = Timestamp::FromString(WaValue(upper_const).ToString(), false);
 						} else {
 							upper_ts = timestamp_t(0);
 						}
@@ -1337,42 +1334,42 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		}
 
 		// Check if this is a comparison expression
-		if (filter->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+		if (!WaIsComparison(*filter)) {
 			continue;
 		}
 
 		// Handle timestamp range comparisons (>, >=, <, <=) for automatic crawl_id lookup
-		if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
-		    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO ||
-		    filter->type == ExpressionType::COMPARE_LESSTHAN ||
-		    filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
-			auto &comparison = filter->Cast<BoundComparisonExpression>();
+		if (filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHAN ||
+		    filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHANOREQUALTO ||
+		    filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHAN ||
+		    filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+			auto comparison = WaAsComparison(*filter);
 
 			// Check if left side is a timestamp column reference
 			if (comparison.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 				auto &col_ref = comparison.left->Cast<BoundColumnRefExpression>();
 
-				if (col_ref.GetName() == "timestamp" &&
+				if (WaColumnName(col_ref) == "timestamp" &&
 				    comparison.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 					auto &constant = comparison.right->Cast<BoundConstantExpression>();
 
 					// Handle both TIMESTAMP and VARCHAR types
 					timestamp_t ts_value;
-					if (constant.value.type().id() == LogicalTypeId::TIMESTAMP ||
-					    constant.value.type().id() == LogicalTypeId::TIMESTAMP_TZ) {
+					if (WaValue(constant).type().id() == LogicalTypeId::TIMESTAMP ||
+					    WaValue(constant).type().id() == LogicalTypeId::TIMESTAMP_TZ) {
 						// timestamp_t is internally int64_t, get it directly
-						ts_value = timestamp_t(constant.value.GetValue<int64_t>());
-					} else if (constant.value.type().id() == LogicalTypeId::VARCHAR) {
+						ts_value = timestamp_t(WaValue(constant).GetValue<int64_t>());
+					} else if (WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
 						// Parse string like '2024-01-01' to timestamp
-						string ts_str = constant.value.ToString();
+						string ts_str = WaValue(constant).ToString();
 						ts_value = Timestamp::FromString(ts_str, false); // false = don't use offset
 					} else {
 						continue; // Unsupported type
 					}
 
 					// Set timestamp_from or timestamp_to based on comparison type
-					if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
-					    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+					if (filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHAN ||
+					    filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
 						bind_data.timestamp_from = ts_value;
 						bind_data.has_timestamp_filter = true;
 						DUCKDB_LOG_DEBUG(context, "Timestamp FROM filter: %s", Timestamp::ToString(ts_value).c_str());
@@ -1387,11 +1384,12 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			}
 		}
 
-		if (filter->type != ExpressionType::COMPARE_EQUAL && filter->type != ExpressionType::COMPARE_NOTEQUAL) {
+		if (filter->GetExpressionType() != ExpressionType::COMPARE_EQUAL &&
+		    filter->GetExpressionType() != ExpressionType::COMPARE_NOTEQUAL) {
 			continue;
 		}
 
-		auto &comparison = filter->Cast<BoundComparisonExpression>();
+		auto comparison = WaAsComparison(*filter);
 
 		// Check if left side is a bound column reference
 		if (comparison.left->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
@@ -1406,10 +1404,10 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		auto &constant = comparison.right->Cast<BoundConstantExpression>();
 
 		// Get the column binding
-		idx_t table_index = col_ref.binding.table_index;
+		auto table_index = WaBinding(col_ref).table_index;
 
 		// Get the column name from the expression itself (this is the most reliable way)
-		string column_name = col_ref.GetName();
+		string column_name = WaColumnName(col_ref);
 
 		// Validate table index matches our table
 		if (table_index != get.table_index) {
@@ -1417,8 +1415,8 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		}
 
 		// Handle URL filtering (special case - uses url parameter)
-		if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			string original_pattern = constant.value.ToString();
+		if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+			string original_pattern = WaValue(constant).ToString();
 			// Convert SQL LIKE wildcards (%) to CDX API wildcards (*)
 			bind_data.url_filter = ConvertSQLWildcardsToCDX(original_pattern);
 			DUCKDB_LOG_DEBUG(context, "URL filter: '%s' -> '%s'", original_pattern.c_str(),
@@ -1426,9 +1424,9 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 			filters_to_remove.push_back(i);
 		}
 		// Handle crawl_id filtering (sets the index_name to use)
-		else if (column_name == "crawl_id" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			if (filter->type == ExpressionType::COMPARE_EQUAL) {
-				bind_data.index_name = constant.value.ToString();
+		else if (column_name == "crawl_id" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
+				bind_data.index_name = WaValue(constant).ToString();
 				DUCKDB_LOG_DEBUG(context, "crawl_id filter set index_name to: %s", bind_data.index_name.c_str());
 				filters_to_remove.push_back(i);
 			}
@@ -1436,18 +1434,18 @@ static void CommonCrawlPushdownComplexFilter(ClientContext &context, LogicalGet 
 		// Handle statuscode filtering (uses CDX filter parameter)
 		// CDX API syntax: filter==status:200 means &filter==status:200
 		// NOTE: Common Crawl uses 'status' field name (not 'statuscode')
-		else if (column_name == "statuscode" && (constant.value.type().id() == LogicalTypeId::INTEGER ||
-		                                         constant.value.type().id() == LogicalTypeId::BIGINT)) {
-			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
-			string filter_str = op + "status:" + to_string(constant.value.GetValue<int32_t>());
+		else if (column_name == "statuscode" && (WaValue(constant).type().id() == LogicalTypeId::INTEGER ||
+		                                         WaValue(constant).type().id() == LogicalTypeId::BIGINT)) {
+			string op = (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
+			string filter_str = op + "status:" + to_string(WaValue(constant).GetValue<int32_t>());
 			bind_data.cdx_filters.push_back(filter_str);
 			filters_to_remove.push_back(i);
 		}
 		// Handle mimetype filtering (uses CDX filter parameter)
 		// NOTE: Common Crawl uses 'mime' field name (not 'mimetype')
-		else if (column_name == "mimetype" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			string op = (filter->type == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
-			string filter_str = op + "mime:" + constant.value.ToString();
+		else if (column_name == "mimetype" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+			string op = (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) ? "=" : "!";
+			string filter_str = op + "mime:" + WaValue(constant).ToString();
 			bind_data.cdx_filters.push_back(filter_str);
 			filters_to_remove.push_back(i);
 		}
@@ -1487,7 +1485,7 @@ void OptimizeCommonCrawlLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "common_crawl_index") {
+		if (WaTableFunctionName(get) != "common_crawl_index") {
 			OptimizeCommonCrawlLimitPushdown(op->children[0]);
 			return;
 		}
@@ -1538,15 +1536,15 @@ void RegisterCommonCrawlFunction(ExtensionLoader &loader) {
 	// - Optional max_results parameter controls CDX API result size (default: 100)
 	TableFunctionSet common_crawl_set("common_crawl_index");
 
-	auto func = TableFunction({}, CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
+	auto func = TableFunction(vector<LogicalType> {}, CommonCrawlScan, CommonCrawlBind, CommonCrawlInitGlobal);
 	func.cardinality = CommonCrawlCardinality;
 	func.pushdown_complex_filter = CommonCrawlPushdownComplexFilter;
 	func.projection_pushdown = true;
 
 	// Add named parameters
-	func.named_parameters["max_results"] = LogicalType::BIGINT;
-	func.named_parameters["debug"] = LogicalType::BOOLEAN;
-	func.named_parameters["timeout"] = LogicalType::BIGINT;
+	WaAddNamedParameter(func, "max_results", LogicalType::BIGINT);
+	WaAddNamedParameter(func, "debug", LogicalType::BOOLEAN);
+	WaAddNamedParameter(func, "timeout", LogicalType::BIGINT);
 
 	common_crawl_set.AddFunction(func);
 

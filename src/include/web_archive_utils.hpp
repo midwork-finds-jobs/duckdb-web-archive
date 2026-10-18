@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "web_archive_compat.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/function/table_function.hpp"

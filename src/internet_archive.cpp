@@ -362,7 +362,7 @@ static FetchResult FetchArchivedPage(ClientContext &context, const ArchiveOrgRec
 
 // Bind function for wayback_machine table function
 static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, WaNames &names) {
 	g_start_time = std::chrono::steady_clock::now();
 	DUCKDB_LOG_DEBUG(context, "WaybackMachineBind called +%.0fms", ElapsedMs());
 
@@ -370,6 +370,10 @@ static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, Table
 
 	// Handle named parameters
 	for (auto &kv : input.named_parameters) {
+		// DuckDB 2.0 passes declared-but-omitted keyword parameters as their (NULL) default.
+		if (kv.second.IsNull()) {
+			continue;
+		}
 		if (kv.first == "max_results") {
 			if (kv.second.type().id() != LogicalTypeId::BIGINT) {
 				throw BinderException("wayback_machine max_results parameter must be an integer");
@@ -451,7 +455,7 @@ static unique_ptr<FunctionData> WaybackMachineBind(ClientContext &context, Table
 
 	// Don't set fetch_response here - will be determined by projection pushdown
 	bind_data->fetch_response = false;
-	bind_data->column_names = names;
+	bind_data->column_names = WaStrings(names);
 	bind_data->column_types = return_types;
 
 	return std::move(bind_data);
@@ -632,29 +636,29 @@ static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data,
 
 			try {
 				if (col_name == "url") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.original));
 				} else if (col_name == "timestamp") {
-					auto data_ptr = FlatVector::GetData<timestamp_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<timestamp_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = ParseCDXTimestamp(record.timestamp);
 				} else if (col_name == "urlkey") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.urlkey));
 				} else if (col_name == "mimetype") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.mime_type));
 				} else if (col_name == "statuscode") {
-					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int32_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.status_code;
 				} else if (col_name == "digest") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] =
 					    StringVector::AddString(output.data[proj_idx], SanitizeUTF8(record.digest));
 				} else if (col_name == "length") {
-					auto data_ptr = FlatVector::GetData<int64_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int64_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = record.length;
 				} else if (col_name == "response") {
 					if (bind_data.fetch_response && !response_results.empty()) {
@@ -663,12 +667,12 @@ static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data,
 						auto &struct_vector = output.data[proj_idx];
 						auto &struct_children = StructVector::GetEntries(struct_vector);
 						// Child 0: body (BLOB)
-						auto &body_vector = struct_children[0];
-						auto body_data = FlatVector::GetData<string_t>(*body_vector);
+						auto body_vector = WaVec(struct_children[0]);
+						auto body_data = WaData<string_t>(*body_vector);
 						body_data[output_offset] = StringVector::AddStringOrBlob(*body_vector, result.body);
 						// Child 1: error (VARCHAR)
-						auto &error_vector = struct_children[1];
-						auto error_data = FlatVector::GetData<string_t>(*error_vector);
+						auto error_vector = WaVec(struct_children[1]);
+						auto error_data = WaData<string_t>(*error_vector);
 						if (result.error.empty()) {
 							FlatVector::SetNull(*error_vector, output_offset, true);
 						} else {
@@ -679,7 +683,7 @@ static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data,
 					}
 				} else if (col_name == "year") {
 					// Extract year from timestamp (format: YYYYMMDDhhmmss)
-					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int32_t>(output.data[proj_idx]);
 					if (record.timestamp.length() >= 4) {
 						data_ptr[output_offset] = std::stoi(record.timestamp.substr(0, 4));
 					} else {
@@ -687,14 +691,14 @@ static void WaybackMachineScan(ClientContext &context, TableFunctionInput &data,
 					}
 				} else if (col_name == "month") {
 					// Extract month from timestamp (format: YYYYMMDDhhmmss)
-					auto data_ptr = FlatVector::GetData<int32_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<int32_t>(output.data[proj_idx]);
 					if (record.timestamp.length() >= 6) {
 						data_ptr[output_offset] = std::stoi(record.timestamp.substr(4, 2));
 					} else {
 						FlatVector::SetNull(output.data[proj_idx], output_offset, true);
 					}
 				} else if (col_name == "cdx_url") {
-					auto data_ptr = FlatVector::GetData<string_t>(output.data[proj_idx]);
+					auto data_ptr = WaData<string_t>(output.data[proj_idx]);
 					data_ptr[output_offset] = StringVector::AddString(output.data[proj_idx], bind_data.cdx_url);
 				}
 			} catch (const std::exception &ex) {
@@ -779,24 +783,24 @@ static bool TryHandleInExpression(ClientContext &context, WaybackMachineBindData
 	}
 
 	vector<string> values;
-	for (idx_t j = 1; j < op.children.size(); j++) {
-		if (op.children[j]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+	for (idx_t j = 1; j < WaChildren(op).size(); j++) {
+		if (WaChildren(op)[j]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 			return false;
 		}
-		auto &const_expr = op.children[j]->Cast<BoundConstantExpression>();
+		auto &const_expr = WaChildren(op)[j]->Cast<BoundConstantExpression>();
 
 		if (is_integer) {
-			if (const_expr.value.type().id() != LogicalTypeId::INTEGER &&
-			    const_expr.value.type().id() != LogicalTypeId::BIGINT) {
+			if (WaValue(const_expr).type().id() != LogicalTypeId::INTEGER &&
+			    WaValue(const_expr).type().id() != LogicalTypeId::BIGINT) {
 				return false;
 			}
-			values.push_back(to_string(const_expr.value.GetValue<int32_t>()));
+			values.push_back(to_string(WaValue(const_expr).GetValue<int32_t>()));
 		} else {
-			if (const_expr.value.type().id() != LogicalTypeId::VARCHAR) {
+			if (WaValue(const_expr).type().id() != LogicalTypeId::VARCHAR) {
 				return false;
 			}
 			// Escape regex special chars for string values
-			values.push_back(EscapeRegex(const_expr.value.ToString()));
+			values.push_back(EscapeRegex(WaValue(const_expr).ToString()));
 		}
 	}
 
@@ -842,14 +846,14 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			auto &func = filter->Cast<BoundFunctionExpression>();
 
 			// Handle LIKE for url column - just replace % with * for CDX API
-			if ((func.function.name == "like" || func.function.name == "~~") && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
+			if ((WaFunctionName(func) == "like" || WaFunctionName(func) == "~~") && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
 
-				if (col_ref.GetName() == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					bind_data.url_filter = constant.value.ToString();
+				if (WaColumnName(col_ref) == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					bind_data.url_filter = WaValue(constant).ToString();
 					// Replace SQL % wildcards with CDX API * wildcards
 					for (size_t pos = 0; pos < bind_data.url_filter.size(); ++pos) {
 						if (bind_data.url_filter[pos] == '%') {
@@ -862,10 +866,10 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				// Handle LIKE for CDX regex columns
-				string col_name = col_ref.GetName();
+				string col_name = WaColumnName(col_ref);
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string like_pattern = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string like_pattern = WaValue(constant).ToString();
 					string regex_pattern = LikeToRegex(like_pattern);
 					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "LIKE");
 					filters_to_remove.push_back(i);
@@ -875,15 +879,15 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 			// Handle NOT LIKE (!~~) for url column -> !original:regex filter
 			// CDX API uses 'original' field name for URL
-			if ((func.function.name == "!~~" || func.function.name == "not_like") && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if ((WaFunctionName(func) == "!~~" || WaFunctionName(func) == "not_like") && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
-				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string like_pattern = constant.value.ToString();
+				if (col_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string like_pattern = WaValue(constant).ToString();
 					string regex_pattern = LikeToRegex(like_pattern);
 					string filter_str = "!original:" + regex_pattern;
 					bind_data.cdx_filters.push_back(filter_str);
@@ -895,8 +899,8 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 				// Handle NOT LIKE for CDX regex columns (urlkey, mimetype, statuscode)
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string like_pattern = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string like_pattern = WaValue(constant).ToString();
 					string regex_pattern = LikeToRegex(like_pattern);
 					string filter_str = "!" + col_name + ":" + regex_pattern;
 					bind_data.cdx_filters.push_back(filter_str);
@@ -908,17 +912,17 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			}
 
 			// Handle suffix() - DuckDB optimizes LIKE '%x' to suffix()
-			if (func.function.name == "suffix" && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if (WaFunctionName(func) == "suffix" && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				// Handle suffix(url, '.domain.com') -> url=*.domain.com
 				// CDX server auto-detects matchType from wildcard pattern, no need to specify
-				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string suffix_val = constant.value.ToString();
+				if (col_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string suffix_val = WaValue(constant).ToString();
 					// For URL suffix like '.example.com', use wildcard prefix
 					bind_data.url_filter = "*" + suffix_val;
 					// Don't set match_type - let CDX server auto-detect from pattern
@@ -928,8 +932,8 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string suffix_val = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string suffix_val = WaValue(constant).ToString();
 					TryAddCdxRegexFilter(context, bind_data, col_name, ".*" + suffix_val + "$", "suffix");
 					filters_to_remove.push_back(i);
 					continue;
@@ -937,16 +941,16 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			}
 
 			// Handle prefix() - DuckDB optimizes LIKE 'x%' to prefix()
-			if (func.function.name == "prefix" && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if (WaFunctionName(func) == "prefix" && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				// Handle prefix(url, 'pattern') -> url=pattern* (special case)
-				if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					bind_data.url_filter = constant.value.ToString() + "*";
+				if (col_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					bind_data.url_filter = WaValue(constant).ToString() + "*";
 					DUCKDB_LOG_DEBUG(context, "URL prefix: %s +%.0fms", bind_data.url_filter.c_str(), ElapsedMs());
 					filters_to_remove.push_back(i);
 					continue;
@@ -954,8 +958,8 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 				// Handle prefix for CDX regex columns
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string prefix_val = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string prefix_val = WaValue(constant).ToString();
 					TryAddCdxRegexFilter(context, bind_data, col_name, "^" + prefix_val + ".*", "prefix");
 					filters_to_remove.push_back(i);
 					continue;
@@ -963,16 +967,16 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			}
 
 			// Handle contains() - DuckDB optimizes LIKE '%x%' to contains()
-			if (func.function.name == "contains" && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if (WaFunctionName(func) == "contains" && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string escaped = EscapeRegex(constant.value.ToString());
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string escaped = EscapeRegex(WaValue(constant).ToString());
 					TryAddCdxRegexFilter(context, bind_data, col_name, ".*" + escaped + ".*", "contains");
 					filters_to_remove.push_back(i);
 					continue;
@@ -980,16 +984,17 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			}
 
 			// Handle regexp_matches: column ~ 'regex'
-			if ((func.function.name == "regexp_matches" || func.function.name == "~") && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if ((WaFunctionName(func) == "regexp_matches" || WaFunctionName(func) == "~") &&
+			    WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string regex_pattern = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string regex_pattern = WaValue(constant).ToString();
 					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "regex");
 					filters_to_remove.push_back(i);
 					continue;
@@ -997,16 +1002,16 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 			}
 
 			// Handle regexp_full_match: SIMILAR TO converts to this
-			if (func.function.name == "regexp_full_match" && func.children.size() >= 2 &&
-			    func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-			    func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
-				auto &constant = func.children[1]->Cast<BoundConstantExpression>();
-				string col_name = col_ref.GetName();
+			if (WaFunctionName(func) == "regexp_full_match" && WaChildren(func).size() >= 2 &&
+			    WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+			    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
+				auto &constant = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				if (CDX_REGEX_COLUMNS.find(col_name) != CDX_REGEX_COLUMNS.end() &&
-				    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-					string sql_regex = constant.value.ToString();
+				    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+					string sql_regex = WaValue(constant).ToString();
 					string regex_pattern = SqlRegexToJavaRegex(sql_regex);
 					TryAddCdxRegexFilter(context, bind_data, col_name, regex_pattern, "SIMILAR TO");
 					filters_to_remove.push_back(i);
@@ -1017,21 +1022,22 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 		// Handle NOT (OPERATOR_NOT) for urlkey: NOT regexp_matches() or NOT LIKE
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
-		    filter->type == ExpressionType::OPERATOR_NOT) {
+		    filter->GetExpressionType() == ExpressionType::OPERATOR_NOT) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
-			if (op.children.size() >= 1 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-				auto &inner_func = op.children[0]->Cast<BoundFunctionExpression>();
+			if (WaChildren(op).size() >= 1 &&
+			    WaChildren(op)[0]->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+				auto &inner_func = WaChildren(op)[0]->Cast<BoundFunctionExpression>();
 
 				// NOT regexp_matches(urlkey, 'regex')
-				if ((inner_func.function.name == "regexp_matches" || inner_func.function.name == "~") &&
-				    inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+				if ((WaFunctionName(inner_func) == "regexp_matches" || WaFunctionName(inner_func) == "~") &&
+				    WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
 
-					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string regex_pattern = constant.value.ToString();
+					if (WaColumnName(col_ref) == "urlkey" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string regex_pattern = WaValue(constant).ToString();
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
 						DUCKDB_LOG_DEBUG(context, "urlkey NOT regex: %s +%.0fms", filter_str.c_str(), ElapsedMs());
@@ -1042,16 +1048,16 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 				// NOT (urlkey LIKE '%pattern') -> !urlkey:.*pattern$
 				// NOT (url LIKE 'pattern') -> !original:regex  (CDX uses 'original' for URL field)
-				if ((inner_func.function.name == "like" || inner_func.function.name == "~~") &&
-				    inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
-					string col_name = col_ref.GetName();
+				if ((WaFunctionName(inner_func) == "like" || WaFunctionName(inner_func) == "~~") &&
+				    WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
+					string col_name = WaColumnName(col_ref);
 
-					if (col_name == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string like_pattern = constant.value.ToString();
+					if (col_name == "urlkey" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string like_pattern = WaValue(constant).ToString();
 						string regex_pattern = LikeToRegex(like_pattern);
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
@@ -1062,8 +1068,8 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 					}
 
 					// url NOT LIKE -> !original:regex (CDX field name is 'original')
-					if (col_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string like_pattern = constant.value.ToString();
+					if (col_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string like_pattern = WaValue(constant).ToString();
 						string regex_pattern = LikeToRegex(like_pattern);
 						string filter_str = "!original:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
@@ -1075,14 +1081,14 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				// NOT suffix(urlkey, 'pattern') -> !urlkey:.*pattern$
-				if (inner_func.function.name == "suffix" && inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+				if (WaFunctionName(inner_func) == "suffix" && WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
 
-					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string suffix_val = constant.value.ToString();
+					if (WaColumnName(col_ref) == "urlkey" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string suffix_val = WaValue(constant).ToString();
 						string filter_str = "!urlkey:.*" + suffix_val + "$";
 						bind_data.cdx_filters.push_back(filter_str);
 						DUCKDB_LOG_DEBUG(context, "urlkey NOT suffix: %s +%.0fms", filter_str.c_str(), ElapsedMs());
@@ -1092,14 +1098,14 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				// NOT prefix(urlkey, 'pattern') -> !urlkey:^pattern.*
-				if (inner_func.function.name == "prefix" && inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+				if (WaFunctionName(inner_func) == "prefix" && WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
 
-					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string prefix_val = constant.value.ToString();
+					if (WaColumnName(col_ref) == "urlkey" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string prefix_val = WaValue(constant).ToString();
 						string filter_str = "!urlkey:^" + prefix_val + ".*";
 						bind_data.cdx_filters.push_back(filter_str);
 						DUCKDB_LOG_DEBUG(context, "urlkey NOT prefix: %s +%.0fms", filter_str.c_str(), ElapsedMs());
@@ -1109,14 +1115,14 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				// NOT SIMILAR TO -> NOT regexp_full_match
-				if (inner_func.function.name == "regexp_full_match" && inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
+				if (WaFunctionName(inner_func) == "regexp_full_match" && WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
 
-					if (col_ref.GetName() == "urlkey" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string sql_regex = constant.value.ToString();
+					if (WaColumnName(col_ref) == "urlkey" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string sql_regex = WaValue(constant).ToString();
 						string regex_pattern = SqlRegexToJavaRegex(sql_regex);
 						string filter_str = "!urlkey:" + regex_pattern;
 						bind_data.cdx_filters.push_back(filter_str);
@@ -1128,16 +1134,16 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 				}
 
 				// NOT contains(urlkey/url, 'pattern') -> !urlkey:.*pattern.* or !original:.*pattern.*
-				if (inner_func.function.name == "contains" && inner_func.children.size() >= 2 &&
-				    inner_func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-				    inner_func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &col_ref = inner_func.children[0]->Cast<BoundColumnRefExpression>();
-					auto &constant = inner_func.children[1]->Cast<BoundConstantExpression>();
-					string col_name = col_ref.GetName();
+				if (WaFunctionName(inner_func) == "contains" && WaChildren(inner_func).size() >= 2 &&
+				    WaChildren(inner_func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+				    WaChildren(inner_func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &col_ref = WaChildren(inner_func)[0]->Cast<BoundColumnRefExpression>();
+					auto &constant = WaChildren(inner_func)[1]->Cast<BoundConstantExpression>();
+					string col_name = WaColumnName(col_ref);
 
 					if ((col_name == "urlkey" || col_name == "url") &&
-					    constant.value.type().id() == LogicalTypeId::VARCHAR) {
-						string contains_val = constant.value.ToString();
+					    WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+						string contains_val = WaValue(constant).ToString();
 						// Escape regex special chars
 						string escaped;
 						for (char c : contains_val) {
@@ -1163,12 +1169,13 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		// Handle IN expressions: statuscode IN (200, 301, 302) or mimetype IN ('text/html', 'text/plain')
 		// DuckDB converts IN to COMPARE_IN operator expression
 		if (filter->GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
-		    filter->type == ExpressionType::COMPARE_IN) {
+		    filter->GetExpressionType() == ExpressionType::COMPARE_IN) {
 			auto &op = filter->Cast<BoundOperatorExpression>();
 			// First child is the column, rest are the values
-			if (op.children.size() >= 2 && op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
-				string col_name = col_ref.GetName();
+			if (WaChildren(op).size() >= 2 &&
+			    WaChildren(op)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = WaChildren(op)[0]->Cast<BoundColumnRefExpression>();
+				string col_name = WaColumnName(col_ref);
 
 				// statuscode is integer, mimetype is string
 				bool is_integer = (col_name == "statuscode");
@@ -1180,18 +1187,18 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		}
 
 		// Handle BETWEEN expressions (timestamp BETWEEN x AND y)
-		if (filter->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-			auto &between = filter->Cast<BoundBetweenExpression>();
+		if (WaIsBetween(*filter)) {
+			auto between = WaAsBetween(*filter);
 			if (between.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 			    between.lower->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT &&
 			    between.upper->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 				auto &col_ref = between.input->Cast<BoundColumnRefExpression>();
-				if (col_ref.GetName() == "timestamp") {
+				if (WaColumnName(col_ref) == "timestamp") {
 					auto &lower_const = between.lower->Cast<BoundConstantExpression>();
 					auto &upper_const = between.upper->Cast<BoundConstantExpression>();
 
-					bind_data.from_date = ToCdxTimestamp(lower_const.value.ToString());
-					bind_data.to_date = ToCdxTimestamp(upper_const.value.ToString());
+					bind_data.from_date = ToCdxTimestamp(WaValue(lower_const).ToString());
+					bind_data.to_date = ToCdxTimestamp(WaValue(upper_const).ToString());
 					DUCKDB_LOG_DEBUG(context, "BETWEEN from=%s to=%s +%.0fms", bind_data.from_date.c_str(),
 					                 bind_data.to_date.c_str(), ElapsedMs());
 
@@ -1202,11 +1209,11 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		}
 
 		// Handle comparison filters
-		if (filter->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+		if (!WaIsComparison(*filter)) {
 			continue;
 		}
 
-		auto &comparison = filter->Cast<BoundComparisonExpression>();
+		auto comparison = WaAsComparison(*filter);
 		if (comparison.left->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
 		    comparison.right->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 			continue;
@@ -1214,57 +1221,57 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 
 		auto &col_ref = comparison.left->Cast<BoundColumnRefExpression>();
 		auto &constant = comparison.right->Cast<BoundConstantExpression>();
-		string column_name = col_ref.GetName();
+		string column_name = WaColumnName(col_ref);
 
 		// Handle URL filtering via equality/LIKE
-		if (column_name == "url" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			if (filter->type == ExpressionType::COMPARE_EQUAL) {
-				bind_data.url_filter = constant.value.ToString();
+		if (column_name == "url" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
+				bind_data.url_filter = WaValue(constant).ToString();
 				bind_data.match_type = "exact";
 				DUCKDB_LOG_DEBUG(context, "URL filter (exact): %s", bind_data.url_filter.c_str());
 				filters_to_remove.push_back(i);
 			}
 		}
 		// Handle statuscode filtering
-		if (column_name == "statuscode" && (constant.value.type().id() == LogicalTypeId::INTEGER ||
-		                                    constant.value.type().id() == LogicalTypeId::BIGINT)) {
-			int32_t val = constant.value.GetValue<int32_t>();
-			if (filter->type == ExpressionType::COMPARE_EQUAL) {
+		if (column_name == "statuscode" && (WaValue(constant).type().id() == LogicalTypeId::INTEGER ||
+		                                    WaValue(constant).type().id() == LogicalTypeId::BIGINT)) {
+			int32_t val = WaValue(constant).GetValue<int32_t>();
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
 				string filter_str = "statuscode:" + to_string(val);
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_NOTEQUAL) {
 				string filter_str = "!statuscode:" + to_string(val);
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
 			}
 		}
 		// Handle mimetype filtering
-		else if (column_name == "mimetype" && constant.value.type().id() == LogicalTypeId::VARCHAR) {
-			if (filter->type == ExpressionType::COMPARE_EQUAL) {
-				string filter_str = "mimetype:" + constant.value.ToString();
+		else if (column_name == "mimetype" && WaValue(constant).type().id() == LogicalTypeId::VARCHAR) {
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
+				string filter_str = "mimetype:" + WaValue(constant).ToString();
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_NOTEQUAL) {
-				string filter_str = "!mimetype:" + constant.value.ToString();
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_NOTEQUAL) {
+				string filter_str = "!mimetype:" + WaValue(constant).ToString();
 				bind_data.cdx_filters.push_back(filter_str);
 				filters_to_remove.push_back(i);
 			}
 		}
 		// Handle timestamp filtering (from/to date range)
-		else if (column_name == "timestamp" && (constant.value.type().id() == LogicalTypeId::TIMESTAMP ||
-		                                        constant.value.type().id() == LogicalTypeId::TIMESTAMP_TZ ||
-		                                        constant.value.type().id() == LogicalTypeId::DATE ||
-		                                        constant.value.type().id() == LogicalTypeId::VARCHAR)) {
-			string cdx_timestamp = ToCdxTimestamp(constant.value.ToString());
+		else if (column_name == "timestamp" && (WaValue(constant).type().id() == LogicalTypeId::TIMESTAMP ||
+		                                        WaValue(constant).type().id() == LogicalTypeId::TIMESTAMP_TZ ||
+		                                        WaValue(constant).type().id() == LogicalTypeId::DATE ||
+		                                        WaValue(constant).type().id() == LogicalTypeId::VARCHAR)) {
+			string cdx_timestamp = ToCdxTimestamp(WaValue(constant).ToString());
 
-			if (filter->type == ExpressionType::COMPARE_GREATERTHAN ||
-			    filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHAN ||
+			    filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
 				bind_data.from_date = cdx_timestamp;
 				DUCKDB_LOG_DEBUG(context, "Timestamp from: %s +%.0fms", cdx_timestamp.c_str(), ElapsedMs());
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_LESSTHAN ||
-			           filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHAN ||
+			           filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
 				bind_data.to_date = cdx_timestamp;
 				DUCKDB_LOG_DEBUG(context, "Timestamp to: %s +%.0fms", cdx_timestamp.c_str(), ElapsedMs());
 				filters_to_remove.push_back(i);
@@ -1272,36 +1279,36 @@ static void WaybackMachinePushdownComplexFilter(ClientContext &context, LogicalG
 		}
 		// Handle year filtering (converts to from/to date range)
 		// year >= 2020 -> from=2020, year <= 2024 -> to=2024
-		else if (column_name == "year" && (constant.value.type().id() == LogicalTypeId::INTEGER ||
-		                                   constant.value.type().id() == LogicalTypeId::BIGINT)) {
-			int32_t year_val = constant.value.GetValue<int32_t>();
+		else if (column_name == "year" && (WaValue(constant).type().id() == LogicalTypeId::INTEGER ||
+		                                   WaValue(constant).type().id() == LogicalTypeId::BIGINT)) {
+			int32_t year_val = WaValue(constant).GetValue<int32_t>();
 			string year_str = to_string(year_val);
 
-			if (filter->type == ExpressionType::COMPARE_GREATERTHAN) {
+			if (filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHAN) {
 				// year > 2020 means from 2021
 				bind_data.from_date = to_string(year_val + 1);
 				DUCKDB_LOG_DEBUG(context, "Year > %d -> from=%s +%.0fms", year_val, bind_data.from_date.c_str(),
 				                 ElapsedMs());
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
 				// year >= 2020 means from 2020
 				bind_data.from_date = year_str;
 				DUCKDB_LOG_DEBUG(context, "Year >= %d -> from=%s +%.0fms", year_val, bind_data.from_date.c_str(),
 				                 ElapsedMs());
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_LESSTHAN) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHAN) {
 				// year < 2024 means to 2023 (CDX uses prefix matching)
 				bind_data.to_date = to_string(year_val - 1);
 				DUCKDB_LOG_DEBUG(context, "Year < %d -> to=%s +%.0fms", year_val, bind_data.to_date.c_str(),
 				                 ElapsedMs());
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_LESSTHANOREQUALTO) {
 				// year <= 2024 means to 2024 (CDX uses prefix matching, includes all of 2024)
 				bind_data.to_date = year_str;
 				DUCKDB_LOG_DEBUG(context, "Year <= %d -> to=%s +%.0fms", year_val, bind_data.to_date.c_str(),
 				                 ElapsedMs());
 				filters_to_remove.push_back(i);
-			} else if (filter->type == ExpressionType::COMPARE_EQUAL) {
+			} else if (filter->GetExpressionType() == ExpressionType::COMPARE_EQUAL) {
 				// year = 2024 means from 2024 to 2024 (CDX uses prefix matching)
 				bind_data.from_date = year_str;
 				bind_data.to_date = year_str;
@@ -1345,17 +1352,17 @@ static bool IsTimestampDescTopN(LogicalTopN &top_n, const WaybackMachineBindData
 
 	if (expr_class == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &col_ref = first_order.expression->Cast<BoundColumnRefExpression>();
-		string col_name = col_ref.GetName();
+		string col_name = WaColumnName(col_ref);
 
 		// Check if column name contains "timestamp" (handles qualified names like 'wayback_machine."timestamp"')
-		if (col_name.find("timestamp") != string::npos || col_ref.alias.find("timestamp") != string::npos) {
+		if (col_name.find("timestamp") != string::npos || WaAlias(col_ref).find("timestamp") != string::npos) {
 			return true;
 		}
 
 		// Also check by column binding - timestamp is column index 1 in our schema
 		// (url=0, timestamp=1, urlkey=2, mimetype=3, statuscode=4, digest=5, length=6, response=7, year=8, month=9,
 		// cdx_url=10 if debug)
-		if (col_ref.binding.column_index == 1) {
+		if (WaBinding(col_ref).column_index == 1) {
 			return true;
 		}
 	}
@@ -1383,7 +1390,7 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "wayback_machine") {
+		if (WaTableFunctionName(get) != "wayback_machine") {
 			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
@@ -1430,7 +1437,7 @@ void OptimizeWaybackMachineLimitPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "wayback_machine") {
+		if (WaTableFunctionName(get) != "wayback_machine") {
 			OptimizeWaybackMachineLimitPushdown(op->children[0]);
 			return;
 		}
@@ -1505,12 +1512,12 @@ struct CollapseTarget {
 static string GetColumnNameFromRef(const BoundColumnRefExpression &col_ref, const LogicalGet &get) {
 	auto &bind_data = get.bind_data->Cast<WaybackMachineBindData>();
 	auto &column_ids = get.GetColumnIds();
-	idx_t binding_col = col_ref.binding.column_index;
+	idx_t binding_col = WaBinding(col_ref).column_index;
 
 	// First try: Use the expression's alias if it matches a known column
-	if (!col_ref.alias.empty()) {
+	if (!WaAlias(col_ref).empty()) {
 		for (const auto &col_name : bind_data.column_names) {
-			if (col_name == col_ref.alias) {
+			if (col_name == WaAlias(col_ref)) {
 				return col_name;
 			}
 		}
@@ -1526,7 +1533,7 @@ static string GetColumnNameFromRef(const BoundColumnRefExpression &col_ref, cons
 
 	// Third try: look up by GetName() which includes the column name
 	// This handles virtual/computed columns like 'year' and 'month'
-	string ref_name = col_ref.GetName();
+	string ref_name = WaColumnName(col_ref);
 	for (const auto &col_name : bind_data.column_names) {
 		if (col_name == ref_name) {
 			return col_name;
@@ -1545,14 +1552,13 @@ static string GetColumnNameFromRef(const BoundColumnRefExpression &col_ref, cons
 static bool TryGetIntegerValue(const Expression &expr, int64_t &out_value) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 		auto &constant = expr.Cast<BoundConstantExpression>();
-		if (constant.value.type().IsIntegral() && !constant.value.IsNull()) {
-			out_value = constant.value.GetValue<int64_t>();
+		if (WaValue(constant).type().IsIntegral() && !WaValue(constant).IsNull()) {
+			out_value = WaValue(constant).GetValue<int64_t>();
 			return true;
 		}
-	} else if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+	} else if (WaIsCast(expr)) {
 		// Handle CAST(N AS BIGINT) etc.
-		auto &cast_expr = expr.Cast<BoundCastExpression>();
-		return TryGetIntegerValue(*cast_expr.child, out_value);
+		return TryGetIntegerValue(WaCastChild(expr), out_value);
 	}
 	return false;
 }
@@ -1571,29 +1577,30 @@ static CollapseTarget AnalyzeCollapseExpression(const Expression &expr, const Lo
 		auto &func = expr.Cast<BoundFunctionExpression>();
 
 		// Handle array_slice (used for urlkey[:6] and urlkey[1:6] syntax)
-		if (func.function.name == "array_slice" && func.children.size() >= 3) {
-			if (func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+		if (WaFunctionName(func) == "array_slice" && WaChildren(func).size() >= 3) {
+			if (WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
 				string col_name = GetColumnNameFromRef(col_ref, get);
 
 				// Second arg: either empty list [] (for [:N]) or 1 (for [1:N])
 				bool starts_at_beginning = false;
-				if (func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &start_const = func.children[1]->Cast<BoundConstantExpression>();
-					auto type_id = start_const.value.type().id();
+				if (WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &start_const = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					auto type_id = WaValue(start_const).type().id();
 					// Check for empty list (urlkey[:6] case) - type is LIST and value is empty
 					if (type_id == LogicalTypeId::LIST) {
 						// Empty list means from start
 						starts_at_beginning = true;
-					} else if (start_const.value.type().IsIntegral()) {
-						int64_t start_val = start_const.value.GetValue<int64_t>();
+					} else if (WaValue(start_const).type().IsIntegral()) {
+						int64_t start_val = WaValue(start_const).GetValue<int64_t>();
 						starts_at_beginning = (start_val == 1);
 					}
 				}
 				// Also handle case where second arg might be NULL (another representation of "from start")
-				if (!starts_at_beginning && func.children[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-					auto &start_const = func.children[1]->Cast<BoundConstantExpression>();
-					if (start_const.value.IsNull()) {
+				if (!starts_at_beginning &&
+				    WaChildren(func)[1]->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+					auto &start_const = WaChildren(func)[1]->Cast<BoundConstantExpression>();
+					if (WaValue(start_const).IsNull()) {
 						starts_at_beginning = true;
 					}
 				}
@@ -1601,7 +1608,7 @@ static CollapseTarget AnalyzeCollapseExpression(const Expression &expr, const Lo
 				// Third arg is end position (which equals prefix length for CDX)
 				if (starts_at_beginning) {
 					int64_t prefix_len = 0;
-					if (TryGetIntegerValue(*func.children[2], prefix_len)) {
+					if (TryGetIntegerValue(*WaChildren(func)[2], prefix_len)) {
 						if (!col_name.empty() && prefix_len > 0) {
 							return CollapseTarget(col_name, static_cast<int>(prefix_len));
 						}
@@ -1610,17 +1617,18 @@ static CollapseTarget AnalyzeCollapseExpression(const Expression &expr, const Lo
 			}
 		}
 		// Handle substr/substring(col, 1, N)
-		else if ((func.function.name == "substr" || func.function.name == "substring") && func.children.size() >= 3) {
-			if (func.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				auto &col_ref = func.children[0]->Cast<BoundColumnRefExpression>();
+		else if ((WaFunctionName(func) == "substr" || WaFunctionName(func) == "substring") &&
+		         WaChildren(func).size() >= 3) {
+			if (WaChildren(func)[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				auto &col_ref = WaChildren(func)[0]->Cast<BoundColumnRefExpression>();
 				string col_name = GetColumnNameFromRef(col_ref, get);
 
 				int64_t start_val = 0;
-				bool starts_at_one = TryGetIntegerValue(*func.children[1], start_val) && start_val == 1;
+				bool starts_at_one = TryGetIntegerValue(*WaChildren(func)[1], start_val) && start_val == 1;
 
 				if (starts_at_one) {
 					int64_t prefix_len = 0;
-					if (TryGetIntegerValue(*func.children[2], prefix_len) && !col_name.empty() && prefix_len > 0) {
+					if (TryGetIntegerValue(*WaChildren(func)[2], prefix_len) && !col_name.empty() && prefix_len > 0) {
 						return CollapseTarget(col_name, static_cast<int>(prefix_len));
 					}
 				}
@@ -1643,10 +1651,10 @@ static const Expression *ResolveExpressionThroughProjections(const Expression &e
 			break;
 		}
 		auto &ref = current->Cast<BoundReferenceExpression>();
-		if (ref.index >= proj->expressions.size()) {
+		if (WaIndex(ref) >= proj->expressions.size()) {
 			return nullptr; // Invalid reference
 		}
-		current = proj->expressions[ref.index].get();
+		current = proj->expressions[WaIndex(ref)].get();
 	}
 	return current;
 }
@@ -1672,7 +1680,7 @@ static vector<CollapseTarget> GetDistinctOnTargets(const LogicalDistinct &distin
 		bool use_direct_target = true;
 		if (target->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF && !projections.empty()) {
 			auto &col_ref = target->Cast<BoundColumnRefExpression>();
-			idx_t col_idx = col_ref.binding.column_index;
+			idx_t col_idx = WaBinding(col_ref).column_index;
 
 			// Try to look up the expression in the projection chain
 			// The binding column_index points to an expression in a projection
@@ -1680,9 +1688,9 @@ static vector<CollapseTarget> GetDistinctOnTargets(const LogicalDistinct &distin
 				if (col_idx < proj->expressions.size()) {
 					auto &proj_expr = proj->expressions[col_idx];
 					// Check if this projection expression has an alias matching our columns
-					if (!proj_expr->alias.empty()) {
+					if (!WaAlias(*proj_expr).empty()) {
 						for (const auto &known_col : bind_data.column_names) {
-							if (proj_expr->alias == known_col) {
+							if (WaAlias(*proj_expr) == known_col) {
 								result.emplace_back(known_col, 0);
 								use_direct_target = false;
 								break;
@@ -1692,7 +1700,7 @@ static vector<CollapseTarget> GetDistinctOnTargets(const LogicalDistinct &distin
 					// Also check if it's a function expression for prefix collapse
 					if (use_direct_target && proj_expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 						auto &func = proj_expr->Cast<BoundFunctionExpression>();
-						if (func.function.name == "array_slice" && func.children.size() >= 3) {
+						if (WaFunctionName(func) == "array_slice" && WaChildren(func).size() >= 3) {
 							auto collapse_target = AnalyzeCollapseExpression(*proj_expr, get);
 							if (!collapse_target.column_name.empty() && collapse_target.prefix_length > 0) {
 								result.push_back(collapse_target);
@@ -1854,7 +1862,7 @@ void OptimizeWaybackMachineDistinctOnPushdown(unique_ptr<LogicalOperator> &op) {
 		}
 
 		auto &get = child.get().Cast<LogicalGet>();
-		if (get.function.name != "wayback_machine") {
+		if (WaTableFunctionName(get) != "wayback_machine") {
 			for (auto &c : op->children) {
 				OptimizeWaybackMachineDistinctOnPushdown(c);
 			}
@@ -1908,16 +1916,17 @@ void RegisterWaybackMachineFunction(ExtensionLoader &loader) {
 	// - Optional max_results parameter controls CDX API result size (default: 100)
 	TableFunctionSet wayback_machine_set("wayback_machine");
 
-	auto ia_func = TableFunction({}, WaybackMachineScan, WaybackMachineBind, WaybackMachineInitGlobal);
+	auto ia_func =
+	    TableFunction(vector<LogicalType> {}, WaybackMachineScan, WaybackMachineBind, WaybackMachineInitGlobal);
 	ia_func.cardinality = WaybackMachineCardinality;
 	ia_func.pushdown_complex_filter = WaybackMachinePushdownComplexFilter;
 	ia_func.projection_pushdown = true;
 
 	// Add named parameters
-	ia_func.named_parameters["max_results"] = LogicalType::BIGINT;
-	ia_func.named_parameters["collapse"] = LogicalType::VARCHAR;
-	ia_func.named_parameters["debug"] = LogicalType::BOOLEAN;
-	ia_func.named_parameters["timeout"] = LogicalType::BIGINT;
+	WaAddNamedParameter(ia_func, "max_results", LogicalType::BIGINT);
+	WaAddNamedParameter(ia_func, "collapse", LogicalType::VARCHAR);
+	WaAddNamedParameter(ia_func, "debug", LogicalType::BOOLEAN);
+	WaAddNamedParameter(ia_func, "timeout", LogicalType::BIGINT);
 
 	wayback_machine_set.AddFunction(ia_func);
 

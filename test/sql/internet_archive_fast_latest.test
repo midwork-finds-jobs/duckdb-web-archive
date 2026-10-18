@@ -14,7 +14,7 @@ require httpfs
 # Test: ORDER BY timestamp ASC should NOT use fastLatest
 query I
 SELECT cdx_url NOT LIKE '%fastLatest%' FROM (
-    SELECT cdx_url FROM wayback_machine()
+    SELECT cdx_url FROM wayback_machine(debug := true)
     WHERE url = 'example.com'
     ORDER BY timestamp ASC
     LIMIT 5
@@ -25,7 +25,7 @@ true
 # Test: ORDER BY timestamp DESC should use fastLatest with negative limit
 query I
 SELECT cdx_url LIKE '%fastLatest=true%' AND cdx_url LIKE '%limit=-%' FROM (
-    SELECT cdx_url FROM wayback_machine()
+    SELECT cdx_url FROM wayback_machine(debug := true)
     WHERE url = 'example.com'
     ORDER BY timestamp DESC
     LIMIT 5
@@ -36,7 +36,7 @@ true
 # Test: ORDER BY timestamp DESC LIMIT 10 uses fastLatest with limit=-10
 query I
 SELECT cdx_url LIKE '%fastLatest=true&limit=-10%' FROM (
-    SELECT cdx_url FROM wayback_machine()
+    SELECT cdx_url FROM wayback_machine(debug := true)
     WHERE url = 'example.com'
     ORDER BY timestamp DESC
     LIMIT 10
@@ -47,7 +47,7 @@ true
 # Test: ORDER BY timestamp DESC LIMIT 1 uses fastLatest with limit=-1
 query I
 SELECT cdx_url LIKE '%fastLatest=true&limit=-1%' FROM (
-    SELECT cdx_url FROM wayback_machine()
+    SELECT cdx_url FROM wayback_machine(debug := true)
     WHERE url = 'example.com'
     ORDER BY timestamp DESC
     LIMIT 1
@@ -62,7 +62,7 @@ SELECT
     AND cdx_url LIKE '%limit=-%'
     AND cdx_url LIKE '%filter=statuscode:200%'
 FROM (
-    SELECT cdx_url FROM wayback_machine()
+    SELECT cdx_url FROM wayback_machine(debug := true)
     WHERE url = 'example.com'
       AND statuscode = 200
     ORDER BY timestamp DESC
@@ -77,15 +77,13 @@ true
 
 # Test: Results from ORDER BY timestamp DESC are actually in descending order
 query I
-SELECT COUNT(*) = 0 FROM (
-    SELECT
-        timestamp as ts,
-        LEAD(timestamp) OVER () as next_ts
+SELECT list(ts) = list_reverse_sort(list(ts)) FROM (
+    SELECT timestamp AS ts
     FROM wayback_machine()
     WHERE url = 'example.com'
     ORDER BY timestamp DESC
     LIMIT 5
-) WHERE next_ts > ts;
+);
 ----
 true
 

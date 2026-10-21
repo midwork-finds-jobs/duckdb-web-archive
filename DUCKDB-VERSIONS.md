@@ -33,6 +33,7 @@ By tracking these version branches instead of exact tags, the extension automati
 | main | main | main | Track DuckDB development, early testing |
 | v1.4 | v1.4-andium | main | Stable 1.4.x releases |
 | v1.5 | v1.5-variegata | main | Stable 1.5.x releases |
+| v2.0 | v2.0.0 | v2.0-cyanoptera | Stable 2.0.x releases |
 
 ### Workflow Configuration
 
@@ -71,6 +72,17 @@ with:
   exclude_archs: windows_amd64_mingw
 ```
 
+**v2.0 branch:**
+
+```yaml
+uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
+with:
+  duckdb_version: v2.0.0
+  ci_tools_version: v2.0-cyanoptera
+  extension_name: web_archive
+  exclude_archs: windows_amd64_mingw
+```
+
 ### Excluded Architectures
 
 **windows_amd64_mingw** is excluded from CI due to vcpkg openssl build failures. The main Windows build (windows_amd64) works fine.
@@ -81,6 +93,7 @@ Daily scheduled workflows trigger builds on stable branches to catch compatibili
 
 - `scheduled-1.4.yml` - triggers v1.4 branch build daily at 12:00 UTC
 - `scheduled-1.5.yml` - triggers v1.5 branch build daily at 13:00 UTC
+- `scheduled-2.0.yml` - triggers v2.0 branch build daily at 14:00 UTC
 
 These workflows use `gh workflow run` to trigger the main pipeline on the respective branch.
 

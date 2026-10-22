@@ -8,3 +8,7 @@ duckdb_extension_load(web_archive
 
 # Any extra extensions that should be built
 # e.g.: duckdb_extension_load(json)
+# DuckDB >= 2.0 builds but no longer links loaded extensions; link it so unittest can `require web_archive`
+if(COMMAND duckdb_extension_statically_link)
+  duckdb_extension_statically_link(web_archive)
+endif()
